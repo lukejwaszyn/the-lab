@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- The Lab's app icon: a radar scope. Source for every icon size; regenerate them from this file. -->
+  <!-- Apple's macOS grid: an 824-point rounded square, 100 points in from each edge. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#06100c"/>
+  <g fill="none" stroke="#1b3a2c" stroke-width="10">
+    <circle cx="512" cy="512" r="288"/>
+    <circle cx="512" cy="512" r="192"/>
+    <circle cx="512" cy="512" r="96"/>
+    <line x1="224" y1="512" x2="800" y2="512"/>
+    <line x1="512" y1="224" x2="512" y2="800"/>
+  </g>
+  <!-- The sweep: a 45-degree wedge behind its leading edge. -->
+  <path d="M512 512 L800 512 A288 288 0 0 0 715.6 308.4 Z" fill="#72f7a1" opacity="0.3"/>
+  <line x1="512" y1="512" x2="715.6" y2="308.4" stroke="#72f7a1" stroke-width="14" stroke-linecap="round"/>
+  <!-- A locked target (green) and an acquired one (amber), as on the Radar & Running page. -->
+  <circle cx="649" cy="402" r="24" fill="#72f7a1"/>
+  <circle cx="375" cy="622" r="20" fill="#ffb547"/>
+</svg>
