@@ -1661,7 +1661,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
               <span className="font-mono text-foreground">
                 {providerDeleteTarget?.model || "unknown"}
               </span>
-              ? The API key will be removed from ClaudePrism.
+              ? The API key will be removed from The Lab.
             </DialogDescription>
           </DialogHeader>
           {providerDeleteError && (

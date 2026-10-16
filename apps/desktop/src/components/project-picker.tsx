@@ -238,10 +238,8 @@ export function ProjectPicker() {
         >
           {!isSidebarCollapsed && (
             <div className="flex min-w-0 items-center gap-2">
-              <img src="/icon-192.png" alt="ClaudePrism" className="size-6" />
-              <span className="truncate font-semibold text-sm">
-                ClaudePrism
-              </span>
+              <img src="/icon-192.png" alt="The Lab" className="size-6" />
+              <span className="truncate font-semibold text-sm">The Lab</span>
             </div>
           )}
           <Button
@@ -296,10 +294,10 @@ export function ProjectPicker() {
           )}
         >
           {isSidebarCollapsed ? (
-            <img src="/icon-192.png" alt="ClaudePrism" className="size-4" />
+            <img src="/icon-192.png" alt="The Lab" className="size-4" />
           ) : (
             <>
-              <span className="truncate">ClaudePrism v{appVersion}</span>
+              <span className="truncate">The Lab v{appVersion}</span>
               <div className="flex shrink-0 items-center gap-1">
                 <Button variant="ghost" size="icon" className="size-6" asChild>
                   <a
@@ -1080,7 +1078,7 @@ function EnvironmentStatus({ appVersion }: { appVersion: string }) {
 
         <StatusRow
           ok={true}
-          label="ClaudePrism"
+          label="The Lab"
           detail={appVersion ? `v${appVersion}` : "Checking..."}
         />
       </div>

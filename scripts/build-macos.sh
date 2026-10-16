@@ -36,7 +36,7 @@ pnpm --filter @claude-prism/desktop tauri build --target "$TARGET"
 
 # Notarize DMG
 DMG_PATH=$(find "apps/desktop/src-tauri/target/$TARGET/release/bundle/dmg" -name '*.dmg' | head -1)
-APP_PATH="apps/desktop/src-tauri/target/$TARGET/release/bundle/macos/ClaudePrism.app"
+APP_PATH="apps/desktop/src-tauri/target/$TARGET/release/bundle/macos/The Lab.app"
 
 if [ -z "$DMG_PATH" ]; then
   echo "Error: DMG not found"

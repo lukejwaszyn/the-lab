@@ -366,7 +366,7 @@ function buildProviderSwitchContext(
 
   return [
     "[Provider switch context]",
-    "The conversation below happened earlier in this same ClaudePrism chat before switching model providers.",
+    "The conversation below happened earlier in this same chat in The Lab before switching model providers.",
     "Use it as prior context. Do not repeat it; answer only the user's latest request after this block.",
     "",
     selected.join("\n\n"),

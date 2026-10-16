@@ -1,3 +1,25 @@
+<h1 align="center">The Lab</h1>
+
+<p align="center">
+  A scientific writing workspace for LaTeX, Python and Claude Code.<br/>
+  A fork of <a href="https://github.com/delibae/claude-prism">ClaudePrism</a>.
+</p>
+
+The Lab is a fork of [ClaudePrism](https://github.com/delibae/claude-prism) by delibae (MIT), which started from [Open Prism](https://github.com/assistant-ui/open-prism) by assistant-ui. It keeps ClaudePrism's workspace: the chat with Claude, sessions, Proposed Changes, the PDF preview, uv and Zotero.
+
+On top of that, the plan:
+- **Claude as a checker:** it asks before it acts, and it reviews and answers instead of writing your work for you.
+- **The Lab's LaTeX core:** the engine is chosen per document, errors come by file and line with biber's own message, and Claude gets the `thelab` tools.
+- **Python per folder:** the right interpreter for each folder, with Run and Stop.
+
+The earlier native macOS version is archived at [lukejwaszyn/the-lab-native](https://github.com/lukejwaszyn/the-lab-native).
+
+**There are no releases of The Lab yet.** Build it from source as [CLAUDE.md](CLAUDE.md) describes. The download buttons in ClaudePrism's README below install ClaudePrism, not The Lab.
+
+---
+
+## ClaudePrism's README
+
 <p align="center">
   <img src="./apps/desktop/src-tauri/icons/icon.png" width="120" height="120" alt="ClaudePrism" />
 </p>

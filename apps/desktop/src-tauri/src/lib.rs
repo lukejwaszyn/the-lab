@@ -184,7 +184,7 @@ fn create_new_window(app: tauri::AppHandle) -> Result<(), String> {
 
     #[allow(unused_mut)]
     let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::default())
-        .title("ClaudePrism")
+        .title("The Lab")
         .inner_size(1400.0, 900.0)
         .min_inner_size(800.0, 600.0)
         .zoom_hotkeys_enabled(true)
@@ -407,7 +407,7 @@ fn list_default_projects() -> Result<Vec<ProjectCandidate>, String> {
         return Ok(Vec::new());
     };
 
-    let base = home.join("Documents").join("ClaudePrism");
+    let base = home.join("Documents").join("The Lab");
     if !base.is_dir() {
         return Ok(Vec::new());
     }
