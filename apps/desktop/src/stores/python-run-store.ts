@@ -8,6 +8,7 @@ import {
   emptyOutput,
   type IncomingLine,
   type OutputBuffer,
+  type OutputTone,
 } from "@/lib/run-output";
 import { useDocumentStore } from "@/stores/document-store";
 
@@ -80,6 +81,18 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Adds a note of The Lab's own, unless it is the last line already. */
+function noteOnce(
+  output: OutputBuffer,
+  note: string,
+  tone: OutputTone,
+): OutputBuffer {
+  const last = output.lines[output.lines.length - 1];
+  return last?.stream === "meta" && last.text === note
+    ? output
+    : appendNote(output, note, tone);
+}
+
 let runCounter = 0;
 
 function newRunId(): string {
@@ -134,30 +147,35 @@ export const usePythonRunStore = create<PythonRunState>()((set, get) => ({
     const current = get();
     if (current.status !== "idle") {
       const note = `${current.file ?? "A script"} is still running, so Run started nothing. Stop it first with ⌘. or the Stop button.`;
-      const lines = current.output.lines;
-      const saidSo = lines[lines.length - 1]?.text === note;
       set((s) => ({
         collapsed: false,
-        output: saidSo ? s.output : appendNote(s.output, note, "note"),
+        output: noteOnce(s.output, note, "note"),
       }));
       return;
     }
 
     const file = documents.files.find((f) => f.id === documents.activeFileId);
     if (!file) return;
+    // A refusal is said after the last run's output, which stays to be read.
     if (!isPythonFile(file.relativePath)) {
-      set({
-        ...idle,
+      set((s) => ({
         collapsed: false,
-        output: appendNote(
-          emptyOutput(),
+        output: noteOnce(
+          s.output,
           `Run works on Python files (.py); ${file.name} is not one.`,
           "error",
         ),
-      });
+      }));
       return;
     }
 
+    // A run that starts clears the panel; one refused gives this back.
+    const last = {
+      runId: current.runId,
+      file: current.file,
+      lastEnd: current.lastEnd,
+      output: current.output,
+    };
     const runId = newRunId();
     set({
       ...idle,
@@ -185,12 +203,13 @@ export const usePythonRunStore = create<PythonRunState>()((set, get) => ({
       });
     } catch (err) {
       if (get().runId !== runId) return;
-      set((s) => ({
+      set({
+        ...last,
         status: "idle",
         startedAt: null,
         stopRequested: false,
-        output: appendNote(s.output, errorText(err), "error"),
-      }));
+        output: noteOnce(last.output, errorText(err), "error"),
+      });
       return;
     }
 

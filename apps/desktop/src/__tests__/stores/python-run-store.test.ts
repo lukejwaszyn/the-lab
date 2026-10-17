@@ -219,6 +219,87 @@ describe("Run and the Output panel", () => {
     ]);
   });
 
+  /** Runs the open file to its end, leaving its lines in the panel. */
+  async function finishedRun() {
+    await usePythonRunStore.getState().run();
+    const { runId } = usePythonRunStore.getState();
+    deliver(runId, [
+      { stream: "meta", text: "$ ~/opt/openEMS/venv/bin/python sim/bowtie.py" },
+      { stream: "out", text: "S11 at 2.4 GHz: -18 dB" },
+    ]);
+    finish(runId, {
+      code: 0,
+      signal: null,
+      stopped: false,
+      seconds: 754,
+      summary: "[exited 0 after 754 s (12 min 34 s)]",
+    });
+    return usePythonRunStore.getState();
+  }
+
+  it("keeps the last run's output when Run refuses a file that is not Python", async () => {
+    const before = await finishedRun();
+
+    useDocumentStore.setState({ activeFileId: "main.tex" });
+    await usePythonRunStore.getState().run();
+
+    expect(startCalls()).toHaveLength(1);
+    expect(shown()).toEqual([
+      "meta:$ ~/opt/openEMS/venv/bin/python sim/bowtie.py",
+      "out:S11 at 2.4 GHz: -18 dB",
+      "meta:[exited 0 after 754 s (12 min 34 s)]",
+      "meta:Run works on Python files (.py); main.tex is not one.",
+    ]);
+    const after = usePythonRunStore.getState();
+    expect(after.output.lines[3].tone).toBe("error");
+    expect(after.status).toBe("idle");
+    expect(after.lastEnd).toEqual(before.lastEnd);
+    expect(after.file).toBe("sim/bowtie.py");
+    expect(after.runId).toBe(before.runId);
+
+    // Said once, however often Run is pressed.
+    await usePythonRunStore.getState().run();
+    expect(shown()).toHaveLength(4);
+  });
+
+  it("keeps the last run's output when the backend refuses the next run", async () => {
+    const before = await finishedRun();
+
+    backend(() => {
+      throw "bowtie.py was not run: Invalid thelab.toml: unknown field `interpreters`";
+    });
+    await usePythonRunStore.getState().run();
+
+    expect(shown()).toEqual([
+      "meta:$ ~/opt/openEMS/venv/bin/python sim/bowtie.py",
+      "out:S11 at 2.4 GHz: -18 dB",
+      "meta:[exited 0 after 754 s (12 min 34 s)]",
+      "meta:bowtie.py was not run: Invalid thelab.toml: unknown field `interpreters`",
+    ]);
+    const after = usePythonRunStore.getState();
+    expect(after.output.lines[3].tone).toBe("error");
+    expect(after.status).toBe("idle");
+    expect(after.lastEnd).toEqual(before.lastEnd);
+    expect(after.file).toBe("sim/bowtie.py");
+    expect(after.runId).toBe(before.runId);
+    expect(after.startedAt).toBe(null);
+
+    await usePythonRunStore.getState().run();
+    expect(shown()).toHaveLength(4);
+  });
+
+  it("clears the last run's output when the next run starts", async () => {
+    const before = await finishedRun();
+
+    await usePythonRunStore.getState().run();
+
+    const after = usePythonRunStore.getState();
+    expect(after.status).toBe("running");
+    expect(after.runId).not.toBe(before.runId);
+    expect(after.output.lines).toEqual([]);
+    expect(after.lastEnd).toBe(null);
+  });
+
   it("stops with SIGINT through the backend", async () => {
     await usePythonRunStore.getState().run();
 
