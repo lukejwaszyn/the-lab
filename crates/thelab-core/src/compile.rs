@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::Serialize;
 
 use crate::logparse::{
-    BoxSummary, Diagnostic, Severity, parse_blg, parse_tectonic_console, parse_tex_log,
+    BoxSummary, Diagnostic, OutputFile, Severity, parse_blg, parse_tectonic_console, parse_tex_log,
 };
 use crate::scan::{Project, read_text, scan};
 use crate::tex::Source;
@@ -66,8 +66,11 @@ pub struct CompileResult {
     pub root: String,
     /// Main file, relative to `root`.
     pub main: String,
-    /// The PDF that reflects the sources as of this run. Absent if the run
-    /// did not produce one, even if an older PDF is still on disk.
+    /// The PDF the engine wrote the last time it typeset the sources: in
+    /// this run, or, when latexmk found nothing to redo, in the run whose
+    /// verdict it repeated. Absent if that run wrote none, even if an older
+    /// PDF is still on disk. A bibliography that biber could not read
+    /// leaves the PDF of the last typesetting in place.
     pub pdf_path: Option<String>,
     pub log_path: Option<String>,
     pub duration_ms: u64,
@@ -179,16 +182,11 @@ pub fn compile(root: &Path, options: &CompileOptions) -> Result<CompileResult> {
     ];
     // Tectonic starts from scratch and rewrites its output on every run, so
     // a file it left alone belongs to an earlier run. latexmk runs nothing
-    // when no source has changed and repeats its last verdict instead: on
-    // success the PDF on disk is current, and either way the log on disk is
-    // the one that verdict is about.
-    let (pdf_current, log_current, blg_current) = match engine {
-        Engine::Tectonic => (pdf_rewritten, log_rewritten, blg_rewritten),
-        Engine::Latexmk => (
-            pdf_rewritten || (succeeded && pdf.is_file()),
-            log.is_file(),
-            blg.is_file(),
-        ),
+    // when no source has changed and repeats its last verdict instead, so
+    // the log on disk is the one that verdict is about.
+    let (log_current, blg_current) = match engine {
+        Engine::Tectonic => (log_rewritten, blg_rewritten),
+        Engine::Latexmk => (log.is_file(), blg.is_file()),
     };
 
     let mut errors = Vec::new();
@@ -200,6 +198,19 @@ pub fn compile(root: &Path, options: &CompileOptions) -> Result<CompileResult> {
     };
     let has_log = report.is_some();
     let mut report = report.take().unwrap_or_default();
+
+    let pdf_current = match engine {
+        Engine::Tectonic => pdf_rewritten,
+        // The same sources must give the same answer whether latexmk ran
+        // the engine or only repeated its verdict, so it comes from what is
+        // on disk, not from what this run rewrote. On success the PDF is
+        // current. After a failure it is if the last run wrote it, which
+        // that run's log says: pdflatex keeps a PDF after an error it could
+        // continue past, but an earlier run's PDF stays on disk after a
+        // fatal error in the preamble.
+        Engine::Latexmk => pdf.is_file() && (succeeded || wrote(report.output.as_ref(), &pdf)),
+    };
+
     errors.append(&mut report.errors);
     warnings.append(&mut report.warnings);
 
@@ -320,6 +331,19 @@ pub fn pdf_path(project: &Project) -> Result<PathBuf> {
         .root
         .join(BUILD_DIRECTORY)
         .join(format!("{stem}.pdf")))
+}
+
+/// Whether a run whose log names `output` wrote `pdf`: the same file name,
+/// and the same size where the log gives one.
+fn wrote(output: Option<&OutputFile>, pdf: &Path) -> bool {
+    let Some(output) = output else {
+        return false;
+    };
+    let named = Path::new(&output.file).file_name() == pdf.file_name();
+    let size = output
+        .bytes
+        .is_none_or(|bytes| pdf.metadata().is_ok_and(|m| m.len() == bytes));
+    named && size
 }
 
 /// The error for a document that typeset nothing, which is what the Blank
@@ -567,6 +591,28 @@ fn unexplained_failure(engine: Engine, output: &Output, limit: Duration) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_that_names_the_pdf_and_its_size_wrote_it() {
+        let pdf = std::env::temp_dir().join(format!("thelab-wrote-{}.pdf", std::process::id()));
+        fs::write(&pdf, b"%PDF-1.5 twelve").unwrap();
+        let output = |file: &str, bytes| OutputFile {
+            file: file.to_string(),
+            pages: 1,
+            bytes,
+        };
+        let name = pdf.file_name().unwrap().to_str().unwrap().to_string();
+        assert!(wrote(
+            Some(&output(&format!("build/{name}"), Some(15))),
+            &pdf
+        ));
+        assert!(wrote(Some(&output(&name, None)), &pdf));
+        // Another size: the PDF on disk is not the one that run wrote.
+        assert!(!wrote(Some(&output(&name, Some(16))), &pdf));
+        assert!(!wrote(Some(&output("build/main.xdv", Some(15))), &pdf));
+        assert!(!wrote(None, &pdf));
+        fs::remove_file(&pdf).unwrap();
+    }
 
     #[test]
     fn biber_is_biblatex_s_default_backend() {

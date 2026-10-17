@@ -242,6 +242,10 @@ fn a_failed_build_compiled_again_reports_the_same_errors() {
         let second = compile(dir.path(), &options).unwrap();
         assert!(!second.ok, "{engine:?}");
         assert_eq!(second.errors, first.errors, "{engine:?}");
+        // pdflatex continues past this error and writes a PDF, which the
+        // app shows beside the error. Unchanged sources must show it again.
+        assert_eq!(second.pdf_path, first.pdf_path, "{engine:?}");
+        assert_eq!(second.warnings, first.warnings, "{engine:?}");
         assert_eq!(
             second.errors,
             [error(
@@ -439,5 +443,38 @@ fn an_empty_document_says_it_has_no_pages() {
         };
         let second = compile(dir.path(), &options).unwrap();
         assert_eq!(second.errors, [no_pages.clone()], "{engine:?}: again");
+    }
+}
+
+#[test]
+fn a_fatal_error_compiled_again_still_does_not_show_the_old_pdf() {
+    // pdflatex leaves the previous PDF on disk when it stops in the
+    // preamble, before writing a page.
+    if !have("latexmk") {
+        return;
+    }
+    let (dir, first) = build(&example_thesis(), Engine::Latexmk, None);
+    assert!(first.ok, "{first:#?}");
+    let main = dir.path().join("main.tex");
+    let text = std::fs::read_to_string(&main).unwrap();
+    std::fs::write(
+        &main,
+        text.replacen(
+            "\\begin{document}",
+            "\\usepackage{nonexistentpackage}\n\\begin{document}",
+            1,
+        ),
+    )
+    .unwrap();
+
+    let options = CompileOptions {
+        main: None,
+        engine: Some(Engine::Latexmk),
+    };
+    for run in ["first", "second"] {
+        let result = compile(dir.path(), &options).unwrap();
+        assert!(!result.ok, "{run}");
+        assert_eq!(result.pdf_path, None, "{run}: {result:#?}");
+        assert!(dir.path().join("build/main.pdf").is_file(), "{run}");
     }
 }
