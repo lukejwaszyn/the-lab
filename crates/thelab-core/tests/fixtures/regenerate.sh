@@ -128,6 +128,17 @@ echo "latexmk  spaced-folder: exit $?"
 cp "$folder/build/my thesis.log" "$logs/latexmk/spaced-folder.log"
 rm -rf "$fixed"
 
+# A main file whose name is 42 characters long: its error line,
+# "./<name>.tex:1: Undefined control sequence.", fills column 79, so TeX
+# starts the "l.1" line after it without a line break of its own.
+wrapped=$here/wrapped-names
+stem=an-error-here-is-logged-on-79-columns-wide
+rm -rf "$work/w" && cp -R "$wrapped" "$work/w"
+(cd "$work/w" && latexmk -pdf -interaction=nonstopmode -file-line-error -synctex=1 \
+    -outdir=build "$stem.tex" >/dev/null 2>&1)
+echo "latexmk  error-line-79: exit $?"
+cp "$work/w/build/$stem.log" "$logs/latexmk/error-line-79.log"
+
 # SyncTeX data for the example thesis, from both engines. SyncTeX records
 # absolute paths, so this runs in a fixed folder: the tests name it.
 sync=/tmp/change-fixtures-thesis

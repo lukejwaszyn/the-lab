@@ -593,6 +593,40 @@ fn a_fatal_error_compiled_again_still_does_not_show_the_old_pdf() {
     }
 }
 
+/// A one-line document with an error pdflatex goes on past, under main
+/// file names of 1 to 85 characters. At 42 the error line is exactly 79
+/// characters long, which once hid the PDF. (85 latexmk runs, about 10 s.)
+#[test]
+fn every_main_file_name_length_keeps_its_pdf_beside_an_error() {
+    if !have("latexmk") {
+        return;
+    }
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wrapped-names/an-error-here-is-logged-on-79-columns-wide.tex"),
+    )
+    .unwrap();
+    let options = |main: &str| CompileOptions {
+        main: Some(main.to_string()),
+        engine: Some(Engine::Latexmk),
+    };
+    for length in 1..=85 {
+        let dir = common::TempDir::new("name-length");
+        let main = format!("{}.tex", "n".repeat(length));
+        dir.write(&main, &text);
+        let result = compile(dir.path(), &options(&main)).unwrap();
+        assert_eq!(
+            result.errors,
+            [error(&main, Some(1), "Undefined control sequence")],
+            "name of {length} characters"
+        );
+        assert!(
+            result.pdf_path.is_some(),
+            "name of {length} characters: {result:#?}"
+        );
+    }
+}
+
 /// The first line of the log a compile left: the engine's banner.
 fn banner(result: &CompileResult) -> String {
     let log = result.log_path.as_ref().expect("a log");

@@ -102,22 +102,45 @@ pub fn parse_tex_log(log: &str) -> LogReport {
     while i < lines.len() {
         i = parser.step(&lines, i);
     }
-    parser.finish()
+    let mut report = parser.finish();
+    // Read from the raw lines, so that nothing an earlier line did to the
+    // parse (a line taken for wrapped, an error's context read too far)
+    // can hide the PDF.
+    report.output = find_output(log);
+    report.no_pages = raw_lines(log).any(|line| line.trim_end() == NO_PAGES_LINE);
+    report
+}
+
+const OUTPUT_LINE: &str = "Output written on ";
+const NO_PAGES_LINE: &str = "No pages of output.";
+
+fn raw_lines(log: &str) -> impl Iterator<Item = &str> {
+    log.split('\n')
+        .map(|raw| raw.strip_suffix('\r').unwrap_or(raw))
+}
+
+fn fills_the_line(raw: &str) -> bool {
+    raw.len() == WRAP_COLUMN || raw.chars().count() == WRAP_COLUMN
 }
 
 /// Rejoins lines that TeX broke at column 79. A line of exactly that length
-/// is assumed to continue on the next one.
+/// is assumed to continue on the next one, unless the next one is the
+/// source context of an error: TeX starts that on a line of its own, and
+/// one it has just begun after column 79 counts.
 fn unwrap_lines(log: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut joining = false;
-    for raw in log.split('\n') {
-        let raw = raw.strip_suffix('\r').unwrap_or(raw);
+    for raw in raw_lines(log) {
+        if joining && parse_context_line(raw).is_some() {
+            out.push(std::mem::take(&mut current));
+            joining = false;
+        }
         if !joining {
             current.clear();
         }
         current.push_str(raw);
-        joining = raw.len() == WRAP_COLUMN || raw.chars().count() == WRAP_COLUMN;
+        joining = fills_the_line(raw);
         if !joining {
             out.push(std::mem::take(&mut current));
         }
@@ -126,6 +149,27 @@ fn unwrap_lines(log: &str) -> Vec<String> {
         out.push(current);
     }
     out
+}
+
+/// The last `Output written on ...` line, which always starts a line of its
+/// own, rejoined if TeX wrapped it at column 79. A line it fills exactly
+/// ends it if what it says is already complete.
+fn find_output(log: &str) -> Option<OutputFile> {
+    let lines: Vec<&str> = raw_lines(log).collect();
+    let start = lines
+        .iter()
+        .rposition(|line| line.starts_with(OUTPUT_LINE))?;
+    let mut text = String::new();
+    for line in &lines[start..] {
+        text.push_str(line);
+        if let Some(output) = parse_output_line(&text) {
+            return Some(output);
+        }
+        if !fills_the_line(line) {
+            break;
+        }
+    }
+    None
 }
 
 #[derive(Default)]
@@ -141,8 +185,6 @@ struct LogParser {
     undefined_citations: Vec<String>,
     duplicate_labels: Vec<String>,
     boxes: BoxSummary,
-    output: Option<OutputFile>,
-    no_pages: bool,
 }
 
 impl LogParser {
@@ -198,12 +240,8 @@ impl LogParser {
             return i + 2;
         }
 
-        if let Some(output) = parse_output_line(line) {
-            self.output = Some(output);
-            return i + 1;
-        }
-        if line.trim_end() == "No pages of output." {
-            self.no_pages = true;
+        // Read by `find_output` and `parse_tex_log`; not file tracking.
+        if line.starts_with(OUTPUT_LINE) || line.trim_end() == NO_PAGES_LINE {
             return i + 1;
         }
 
@@ -225,8 +263,8 @@ impl LogParser {
             undefined_citations: self.undefined_citations,
             duplicate_labels: self.duplicate_labels,
             boxes: self.boxes,
-            output: self.output,
-            no_pages: self.no_pages,
+            output: None,
+            no_pages: false,
         }
     }
 

@@ -545,6 +545,128 @@ fn a_fatal_error_leaves_no_output() {
     }
 }
 
+#[test]
+fn an_error_line_of_exactly_79_characters_keeps_the_output_and_the_location() {
+    // A main file whose name is 42 characters long, run as thelab runs
+    // latexmk: "./<name>.tex:1: Undefined control sequence." fills column
+    // 79, so TeX ends the line there and prints "l.1" at the start of the
+    // next one without a line break of its own. The log alone cannot tell
+    // that from a wrapped line.
+    let name = "an-error-here-is-logged-on-79-columns-wide";
+    let log = parse_tex_log(&fixture("latexmk/error-line-79.log"));
+    assert_eq!(
+        log.output,
+        Some(OutputFile {
+            file: format!("build/{name}.pdf"),
+            pages: 1,
+            bytes: Some(12668),
+        })
+    );
+    assert!(!log.no_pages);
+    assert_eq!(
+        log.errors,
+        [error(
+            Some(&format!("{name}.tex")),
+            Some(1),
+            "Undefined control sequence"
+        )]
+    );
+}
+
+/// A log as TeX writes it, column by column: a line ends after column 79
+/// (`max_print_line`), at `print_ln`, and at `print_nl` unless one has just
+/// begun. So a line that ends exactly at column 79 looks like a wrapped one.
+#[derive(Default)]
+struct TexLog {
+    text: String,
+    column: usize,
+}
+
+impl TexLog {
+    fn print(&mut self, text: &str) -> &mut Self {
+        for c in text.chars() {
+            self.text.push(c);
+            self.column += 1;
+            if self.column == 79 {
+                self.text.push('\n');
+                self.column = 0;
+            }
+        }
+        self
+    }
+
+    fn print_ln(&mut self) -> &mut Self {
+        self.text.push('\n');
+        self.column = 0;
+        self
+    }
+
+    fn print_nl(&mut self, text: &str) -> &mut Self {
+        if self.column > 0 {
+            self.print_ln();
+        }
+        self.print(text)
+    }
+}
+
+/// The end of latexmk's log for a one-line document with an undefined
+/// control sequence, whose main file is `name`.tex.
+fn log_with_an_error_in(name: &str) -> String {
+    let mut log = TexLog::default();
+    log.print("This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026)")
+        .print_ln()
+        .print(&format!("**{name}.tex"))
+        .print_ln()
+        .print(&format!("(./{name}.tex"))
+        .print_nl("LaTeX2e <2025-11-01>")
+        .print_nl("(/usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls")
+        .print(")")
+        .print_nl(&format!("./{name}.tex:1: Undefined control sequence."))
+        .print_nl("l.1 ...ticle}\\begin{document}Hello \\undefinedmacro")
+        .print_ln()
+        .print(&format!("{:51}world.\\end{{document}}", ""))
+        .print_nl("The control sequence at the end of the top line")
+        .print_nl("of your error message was never \\def'ed.")
+        .print_ln()
+        .print_ln()
+        .print("[1")
+        .print_nl("{/usr/local/texlive/2026/texmf-var/fonts/map/pdftex/updmap/pdftex.map}]")
+        .print_nl(&format!("(build/{name}.aux)"))
+        .print(" )")
+        .print_nl("</usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>")
+        .print_nl(&format!(
+            "Output written on build/{name}.pdf (1 page, 12668 bytes)."
+        ))
+        .print_nl("PDF statistics:")
+        .print_ln();
+    log.text
+}
+
+#[test]
+fn no_length_of_the_main_file_name_hides_the_output_or_the_error() {
+    // Each length puts a different line at exactly column 79: the error
+    // line (42), the .aux line before the output (67), the output line
+    // itself (28).
+    for length in 1..=85 {
+        let name = "n".repeat(length);
+        let log = parse_tex_log(&log_with_an_error_in(&name));
+        assert_eq!(
+            log.output.map(|output| (output.file, output.bytes)),
+            Some((format!("build/{name}.pdf"), Some(12668))),
+            "name of {length} characters"
+        );
+        assert_eq!(
+            log.errors,
+            [error(
+                Some(&format!("{name}.tex")),
+                Some(1),
+                "Undefined control sequence"
+            )],
+            "name of {length} characters"
+        );
+    }
+}
+
 // ------------------------------------------------------- tectonic console
 
 #[test]
