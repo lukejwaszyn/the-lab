@@ -1665,44 +1665,52 @@ As \\textcite{knuth1984} shows.
     }
 
     #[test]
-    fn test_an_empty_document_that_cannot_be_given_a_page_says_why() {
+    fn test_an_empty_document_that_cannot_be_given_a_page_says_why_every_time() {
         // \begin{document} is in another file, so no blank page is added.
-        if !have("tectonic") && !have("latexmk") {
-            eprintln!("skipped: no engine is installed");
-            return;
-        }
-        let project = tempfile::tempdir().unwrap();
-        std::fs::write(
-            project.path().join("main.tex"),
-            "\\documentclass{article}\n\\input{body}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            project.path().join("body.tex"),
-            "\\begin{document}\n\\end{document}\n",
-        )
-        .unwrap();
+        // The body is emptied after a good compile: pdflatex leaves that
+        // compile's PDF on disk, and latexmk, with no change, finds it up to
+        // date. Neither may pass it off as this document's.
+        let no_pages = CompileProblem {
+            severity: "error",
+            file: Some("main.tex".to_string()),
+            line: None,
+            message: NO_PAGES.to_string(),
+        };
+        for (choice, program) in [
+            (EngineChoice::Tectonic, "tectonic"),
+            (EngineChoice::TexLive, "latexmk"),
+        ] {
+            if !have(program) {
+                eprintln!("skipped {choice:?}: {program} is not installed");
+                continue;
+            }
+            let project = tempfile::tempdir().unwrap();
+            std::fs::write(
+                project.path().join("main.tex"),
+                "\\documentclass{article}\n\\input{body}\n",
+            )
+            .unwrap();
+            let body = project.path().join("body.tex");
+            std::fs::write(&body, "\\begin{document}\nSome text.\n\\end{document}\n").unwrap();
+            let written = compile_project(project.path(), "main.tex", choice);
+            assert!(written.report.ok, "{choice:?}: {:#?}", written.report);
 
-        let outcome = compile_project(project.path(), "main.tex", EngineChoice::Auto);
-        let report = &outcome.report;
-        assert!(outcome.pdf.is_none());
-        assert_eq!(
-            report.errors,
-            [CompileProblem {
-                severity: "error",
-                file: Some("main.tex".to_string()),
-                line: None,
-                message: NO_PAGES.to_string(),
-            }],
-            "{report:#?}"
-        );
-        assert!(
-            report
-                .failure_message()
-                .ends_with(&format!("main.tex: {NO_PAGES}")),
-            "{}",
-            report.failure_message()
-        );
+            std::fs::write(&body, "\\begin{document}\n\\end{document}\n").unwrap();
+            for run in ["first", "second", "third"] {
+                let outcome = compile_project(project.path(), "main.tex", choice);
+                let report = &outcome.report;
+                assert!(outcome.pdf.is_none(), "{choice:?} {run}");
+                assert!(!report.has_pdf && !report.ok, "{choice:?} {run}");
+                assert_eq!(report.errors, [no_pages.clone()], "{choice:?} {run}");
+                assert!(
+                    report
+                        .failure_message()
+                        .ends_with(&format!("main.tex: {NO_PAGES}")),
+                    "{}",
+                    report.failure_message()
+                );
+            }
+        }
     }
 
     #[test]

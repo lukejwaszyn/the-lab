@@ -203,8 +203,12 @@ pub fn compile(root: &Path, options: &CompileOptions) -> Result<CompileResult> {
         // current. After a failure it is if the last run wrote it, which
         // that run's log says: pdflatex keeps a PDF after an error it could
         // continue past, but an earlier run's PDF stays on disk after a
-        // fatal error in the preamble.
-        Engine::Latexmk => pdf.is_file() && (succeeded || wrote(report.output.as_ref(), &pdf)),
+        // fatal error in the preamble. It stays after a run that typeset no
+        // pages as well, and the next, unchanged, compile finds it up to
+        // date and succeeds: a log that says no pages rules it out.
+        Engine::Latexmk => {
+            pdf.is_file() && !report.no_pages && (succeeded || wrote(report.output.as_ref(), &pdf))
+        }
     };
 
     errors.append(&mut report.errors);
@@ -278,7 +282,9 @@ pub fn compile(root: &Path, options: &CompileOptions) -> Result<CompileResult> {
         report.undefined_citations.clear();
     }
 
-    if !succeeded && errors.is_empty() {
+    // latexmk succeeds when it finds an earlier PDF up to date, after a run
+    // that typeset nothing; the log of that run still says so.
+    if (!succeeded || report.no_pages) && errors.is_empty() {
         let diagnostic = if report.no_pages {
             // Tectonic's own warning says the same thing less plainly.
             warnings.retain(|warning| !warning.message.starts_with("did not produce \""));

@@ -446,6 +446,42 @@ fn an_empty_document_says_it_has_no_pages() {
     }
 }
 
+#[test]
+fn emptying_the_body_after_a_good_compile_says_there_are_no_pages_every_time() {
+    // pdflatex leaves the previous PDF on disk when it typesets nothing, and
+    // latexmk, compiling again with no change, finds that PDF up to date.
+    let no_pages = error(
+        "main.tex",
+        None,
+        "No pages of output. Add visible content to the document body.",
+    );
+    let empty = std::fs::read_to_string(fixture_project("empty-body").join("main.tex")).unwrap();
+    for engine in ENGINES {
+        if !have(engine.name()) {
+            continue;
+        }
+        let dir = common::TempDir::new("emptied");
+        dir.write(
+            "main.tex",
+            "\\documentclass{article}\n\\begin{document}\nSome text.\n\\end{document}\n",
+        );
+        let options = CompileOptions {
+            main: None,
+            engine: Some(engine),
+        };
+        let first = compile(dir.path(), &options).unwrap();
+        assert!(first.ok, "{engine:?}: {first:#?}");
+
+        dir.write("main.tex", &empty);
+        for run in ["first", "second", "third"] {
+            let result = compile(dir.path(), &options).unwrap();
+            assert!(!result.ok, "{engine:?} {run}: {result:#?}");
+            assert_eq!(result.errors, [no_pages.clone()], "{engine:?} {run}");
+            assert_eq!(result.pdf_path, None, "{engine:?} {run}");
+        }
+    }
+}
+
 /// The broken-bib project: refs.bib lacks a comma, so biber stops at a
 /// syntax error and every citation is left undefined.
 fn broken_bib() -> std::path::PathBuf {
