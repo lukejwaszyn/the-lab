@@ -457,10 +457,11 @@ fn closing_the_window_while_its_run_starts_means_the_script_never_runs() {
         (recorder, thread)
     };
 
+    // The run holds its window's place while its interpreter is asked,
+    // for a second here. Waiting for the place rather than a fixed time
+    // keeps a slow thread start from changing what is tested.
     let (recorder, starting) = start_in_background("run-1");
-    std::thread::sleep(Duration::from_millis(300));
-    // The run holds its window's place while its interpreter is asked.
-    assert!(runs.is_running("window"));
+    assert!(eventually(PATIENCE, || runs.is_running("window")));
     let ending = runs.end("window").expect("the starting run to end");
     assert!(ending.wait(PATIENCE));
     let refused = starting.join().unwrap().unwrap_err();
@@ -482,7 +483,7 @@ fn closing_the_window_while_its_run_starts_means_the_script_never_runs() {
     // A second Run meanwhile is refused, Stop has nothing to stop yet, and
     // a stale run's id does not end it.
     let (_, starting) = start_in_background("run-2");
-    std::thread::sleep(Duration::from_millis(300));
+    assert!(eventually(PATIENCE, || runs.is_running("window")));
     let (_, again) = start(&runs, &project, "long.py");
     assert_eq!(
         again.unwrap_err(),
