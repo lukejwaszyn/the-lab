@@ -1181,6 +1181,14 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       state.tabs.every((tab) => tab.projectPath === projectPath);
     if (tabsAlreadyScoped) return;
 
+    // The old tabs are dropped, so stop their runs. A run waiting on a
+    // permission request would otherwise wait on its stdin forever.
+    for (const oldTab of state.tabs) {
+      if (oldTab.isStreaming) {
+        invoke("cancel_claude_execution", { tabId: oldTab.id }).catch(() => {});
+      }
+    }
+
     const id = nextTabId();
     const tab = makeDefaultTab(id, projectPath);
     const nextSelectedProviderCredentialId =

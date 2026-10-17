@@ -90,4 +90,20 @@ describe("permissions follow the chat's lifetime", () => {
     expect(pending["tab-a"]).toBeUndefined();
     expect(pending["tab-b"]).toHaveLength(1);
   });
+
+  it("closing or switching the project stops runs left waiting", () => {
+    useClaudeChatStore.setState({
+      tabs: [tab("tab-a", { isStreaming: true }), tab("tab-b")],
+      isStreaming: true,
+    });
+    waitingRequest("tab-a");
+
+    useClaudeChatStore.getState().resetForProject(null);
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("cancel_claude_execution", {
+      tabId: "tab-a",
+    });
+    expect(usePermissionStore.getState().pendingByTab["tab-a"]).toBeUndefined();
+  });
 });
