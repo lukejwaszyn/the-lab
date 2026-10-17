@@ -1,6 +1,7 @@
 #!/bin/sh
 # Regenerates the real TeX logs under logs/ from the projects under projects/
-# (plus crates/examples/thesis). Needs tectonic, pdflatex and bibtex on PATH.
+# (plus crates/examples/thesis). Needs tectonic, pdflatex and bibtex on PATH,
+# and latexmk and biber for the projects under biblatex-projects/.
 #
 # Run it from anywhere:  sh crates/thelab-core/tests/fixtures/regenerate.sh
 # Review the diff afterwards: engine upgrades change log text, and the parser
@@ -14,7 +15,7 @@ logs="$here/logs"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-mkdir -p "$logs/tectonic" "$logs/pdflatex" "$logs/pdflatex-file-line-error"
+mkdir -p "$logs/tectonic" "$logs/pdflatex" "$logs/pdflatex-file-line-error" "$logs/latexmk"
 
 # pdflatex names generated bitmap fonts by their path under TEXMFVAR, which
 # defaults to the home directory. Point it somewhere neutral so that logs do
@@ -69,10 +70,28 @@ run_project() {
     done
 }
 
+# latexmk with biber, run the way thelab's compile runs it: the log and
+# biber's .blg. biber's messages name its temporary copy of each .bib file
+# under $TMPDIR, so the .blg holds that folder.
+run_latexmk_project() {
+    name=$1
+    src=$2
+    rm -rf "$work/l" && cp -R "$src" "$work/l" && rm -rf "$work/l/build"
+    (cd "$work/l" && latexmk -pdf -interaction=nonstopmode -file-line-error -synctex=1 \
+        -outdir=build main.tex >/dev/null 2>&1)
+    echo "latexmk  $name: exit $?"
+    for ext in log blg; do
+        cp "$work/l/build/main.$ext" "$logs/latexmk/$name.$ext"
+    done
+}
+
 for dir in "$here"/projects/*/; do
     run_project "$(basename "$dir")" "$dir"
 done
 run_project thesis "$repo/examples/thesis"
+for dir in "$here"/biblatex-projects/*/; do
+    run_latexmk_project "$(basename "$dir")" "$dir"
+done
 
 # SyncTeX data for the example thesis, from both engines. SyncTeX records
 # absolute paths, so this runs in a fixed folder: the tests name it.

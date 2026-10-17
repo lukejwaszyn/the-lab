@@ -2,7 +2,7 @@
 //! Regenerate those with tests/fixtures/regenerate.sh.
 
 use thelab_core::logparse::{
-    Diagnostic, Severity, parse_blg, parse_tectonic_console, parse_tex_log,
+    Diagnostic, OutputFile, Severity, parse_blg, parse_tectonic_console, parse_tex_log,
 };
 
 fn fixture(path: &str) -> String {
@@ -334,6 +334,137 @@ LaTeX Warning: Label(s) may have changed. Rerun to get cross-references right.
             ),
         ]
     );
+}
+
+#[test]
+fn biblatex_citation_warnings_quote_the_key_with_straight_quotes() {
+    // latexmk with biber, after biber stopped at a syntax error in refs.bib:
+    // the .bbl is empty and every citation is undefined. biblatex quotes
+    // the key 'like this', not `like this' as the kernel and natbib do.
+    let log = parse_tex_log(&fixture("latexmk/broken-bib.log"));
+    assert!(log.errors.is_empty(), "{:?}", log.errors);
+    assert_eq!(
+        log.undefined_citations,
+        ["knuth1984texbook", "lamport1994latex"]
+    );
+    let got: Vec<(Option<&str>, Option<u32>, &str)> = log
+        .warnings
+        .iter()
+        .map(|w| (w.file.as_deref(), w.line, w.message.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                Some("main.tex"),
+                Some(5),
+                "Citation 'knuth1984texbook' on page 1 undefined"
+            ),
+            (
+                Some("main.tex"),
+                Some(5),
+                "Citation 'lamport1994latex' on page 1 undefined"
+            ),
+            (
+                Some("main.tex"),
+                Some(8),
+                "Citation 'knuth1984texbook' on page 2 undefined"
+            ),
+            (Some("main.tex"), Some(9), "Empty bibliography"),
+            (
+                Some("main.tex"),
+                None,
+                "Package biblatex Warning: Please (re)run Biber on the file: main and rerun \
+                 LaTeX afterwards"
+            ),
+        ]
+    );
+}
+
+// ---------------------------------------------------------------- output
+
+#[test]
+fn the_log_names_the_file_the_run_wrote_and_its_size() {
+    let thesis = parse_tex_log(&fixture("pdflatex/thesis.log"));
+    assert_eq!(
+        thesis.output,
+        Some(OutputFile {
+            file: "main.pdf".to_string(),
+            pages: 10,
+            bytes: Some(114560),
+        })
+    );
+    assert!(!thesis.no_pages);
+
+    // Tectonic's XeTeX writes an .xdv, which xdvipdfmx turns into the PDF.
+    let tectonic = parse_tex_log(&fixture("tectonic/thesis.log"));
+    assert_eq!(
+        tectonic.output,
+        Some(OutputFile {
+            file: "main.xdv".to_string(),
+            pages: 10,
+            bytes: Some(89556),
+        })
+    );
+
+    // latexmk's -outdir: the log names the folder too.
+    let latexmk = parse_tex_log(&fixture("latexmk/broken-bib.log"));
+    assert_eq!(
+        latexmk.output,
+        Some(OutputFile {
+            file: "build/main.pdf".to_string(),
+            pages: 2,
+            bytes: Some(30077),
+        })
+    );
+}
+
+#[test]
+fn xetex_writing_a_pdf_itself_does_not_give_its_size() {
+    let log = parse_tex_log("(./main.tex)\nOutput written on build/main.pdf (1 page).\n");
+    assert_eq!(
+        log.output,
+        Some(OutputFile {
+            file: "build/main.pdf".to_string(),
+            pages: 1,
+            bytes: None,
+        })
+    );
+}
+
+#[test]
+fn a_long_output_path_wrapped_at_column_79_is_rejoined() {
+    let path = "/tmp/a-project-folder-with-a-rather-long-name/.prism/build/build/main.pdf";
+    let line = format!("Output written on {path} (12 pages, 345678 bytes).");
+    let (head, tail) = line.split_at(79);
+    let log = parse_tex_log(&format!("(./main.tex)\n{head}\n{tail}\n"));
+    assert_eq!(
+        log.output.map(|o| (o.file, o.bytes)),
+        Some((path.to_string(), Some(345678)))
+    );
+}
+
+#[test]
+fn a_document_with_an_empty_body_has_no_pages_and_no_errors() {
+    // What the Blank template and every new .tex file start as.
+    for variant in ["tectonic", "pdflatex", "pdflatex-file-line-error"] {
+        let log = parse_tex_log(&fixture(&format!("{variant}/empty-body.log")));
+        assert!(log.no_pages, "{variant}");
+        assert_eq!(log.output, None, "{variant}");
+        assert!(log.errors.is_empty(), "{variant}: {:?}", log.errors);
+        assert!(log.warnings.is_empty(), "{variant}: {:?}", log.warnings);
+    }
+}
+
+#[test]
+fn a_fatal_error_leaves_no_output() {
+    // pdflatex's fatal error says "no output PDF file produced"; the
+    // Tectonic log says "No pages of output" as well.
+    for variant in ["tectonic", "pdflatex", "pdflatex-file-line-error"] {
+        let log = parse_tex_log(&fixture(&format!("{variant}/missing-file.log")));
+        assert_eq!(log.output, None, "{variant}");
+        assert!(!log.errors.is_empty(), "{variant}");
+    }
 }
 
 // ------------------------------------------------------- tectonic console

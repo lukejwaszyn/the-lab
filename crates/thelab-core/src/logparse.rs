@@ -68,6 +68,23 @@ pub struct LogReport {
     pub undefined_citations: Vec<String>,
     pub duplicate_labels: Vec<String>,
     pub boxes: BoxSummary,
+    /// The file the run wrote, which the log names at its end. Absent when
+    /// the run wrote nothing: a fatal error, or no pages.
+    pub output: Option<OutputFile>,
+    /// The engine said "No pages of output": the document typeset nothing.
+    /// Tectonic says it after any error that stops its first pass as well.
+    pub no_pages: bool,
+}
+
+/// `Output written on build/main.pdf (9 pages, 69744 bytes).`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputFile {
+    /// As the log spells it: relative to the folder the engine ran in, or
+    /// absolute.
+    pub file: String,
+    pub pages: u32,
+    /// Absent where the engine does not say (XeTeX writing a PDF itself).
+    pub bytes: Option<u64>,
 }
 
 /// TeX wraps log lines at this many characters (`max_print_line`).
@@ -124,6 +141,8 @@ struct LogParser {
     undefined_citations: Vec<String>,
     duplicate_labels: Vec<String>,
     boxes: BoxSummary,
+    output: Option<OutputFile>,
+    no_pages: bool,
 }
 
 impl LogParser {
@@ -179,6 +198,15 @@ impl LogParser {
             return i + 2;
         }
 
+        if let Some(output) = parse_output_line(line) {
+            self.output = Some(output);
+            return i + 1;
+        }
+        if line.trim_end() == "No pages of output." {
+            self.no_pages = true;
+            return i + 1;
+        }
+
         self.track(line);
         i + 1
     }
@@ -197,6 +225,8 @@ impl LogParser {
             undefined_citations: self.undefined_citations,
             duplicate_labels: self.duplicate_labels,
             boxes: self.boxes,
+            output: self.output,
+            no_pages: self.no_pages,
         }
     }
 
@@ -407,6 +437,30 @@ fn skip_until_blank(lines: &[String], start: usize, limit: usize) -> usize {
         i += 1;
     }
     i
+}
+
+/// `Output written on build/main.pdf (9 pages, 69744 bytes).`, or
+/// `(1 page).` when XeTeX writes the PDF itself. The path may hold spaces
+/// and parentheses, so the counts are taken from the end.
+fn parse_output_line(line: &str) -> Option<OutputFile> {
+    let rest = line.strip_prefix("Output written on ")?;
+    let (file, counts) = rest.trim_end().strip_suffix(").")?.rsplit_once(" (")?;
+    let mut parts = counts.split(", ");
+    let pages = parts.next()?;
+    let pages = pages
+        .strip_suffix(" pages")
+        .or_else(|| pages.strip_suffix(" page"))?
+        .parse()
+        .ok()?;
+    let bytes = match parts.next() {
+        Some(size) => Some(size.strip_suffix(" bytes")?.parse().ok()?),
+        None => None,
+    };
+    Some(OutputFile {
+        file: normalize_path(file),
+        pages,
+        bytes,
+    })
 }
 
 /// `l.12 some source text` gives 12.
