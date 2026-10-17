@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use thelab_core::compile::{CompileOptions, CompileResult, Engine, BUILD_DIRECTORY};
+use thelab_core::compile::{CompileOptions, CompileResult, Engine, BUILD_DIRECTORY, NO_PAGES};
 use thelab_core::logparse::{Diagnostic, Severity};
 use tokio::sync::{Mutex, Semaphore};
 
@@ -447,6 +447,43 @@ fn persistent_build_dir(project_dir: &str) -> PathBuf {
     PathBuf::from(project_dir).join(".prism").join("build")
 }
 
+/// What ClaudePrism put before `\begin{document}` to compile a document
+/// with nothing in its body: a blank page instead of an error.
+const BLANK_PAGE: &str = "\\AtEndDocument{\\null}";
+
+/// Whether a compile failed only because the document has no pages: the
+/// Blank template and every new .tex file, until something is written.
+fn only_no_pages(result: &CompileResult) -> bool {
+    result.pdf_path.is_none()
+        && !result.errors.is_empty()
+        && result.errors.iter().all(|error| error.message == NO_PAGES)
+}
+
+/// Adds `BLANK_PAGE` to the copy's main file, on the line of
+/// `\begin{document}` so that line numbers stay right. The project's own
+/// file is untouched, and the next sync puts it back over the copy, whose
+/// size no longer matches. False when there is no `\begin{document}`
+/// outside comments to put it before.
+fn add_blank_page(main_path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(main_path) else {
+        return false;
+    };
+    let source = thelab_core::tex::Source::new(&text);
+    let Some(begin) = source
+        .commands()
+        .into_iter()
+        .find(|command| command.name == "begin" && command.argument == Some("document"))
+    else {
+        return false;
+    };
+    let patched = format!(
+        "{}{BLANK_PAGE}{}",
+        &text[..begin.start],
+        &text[begin.start..]
+    );
+    std::fs::write(main_path, patched).is_ok()
+}
+
 /// Removes `.` and `..` from a path without touching the disk.
 fn clean_path(path: &Path) -> PathBuf {
     let mut cleaned = PathBuf::new();
@@ -559,10 +596,17 @@ pub(crate) fn compile_project(
         main: Some(main_file.replace('\\', "/")),
         engine: choice.engine(),
     };
-    let result = match thelab_core::compile::compile(&work_dir, &options) {
+    let mut result = match thelab_core::compile::compile(&work_dir, &options) {
         Ok(result) => result,
         Err(error) => return failed(error.to_string()),
     };
+    // An empty body shows as a blank page, as it did in ClaudePrism. thelab
+    // itself (Claude's compile tool) keeps saying that there are no pages.
+    if only_no_pages(&result) && add_blank_page(&main_path) {
+        if let Ok(retried) = thelab_core::compile::compile(&work_dir, &options) {
+            result = retried;
+        }
+    }
 
     // thelab resolves the copy to its real path; SyncTeX inputs use that.
     let root = PathBuf::from(&result.root);
@@ -1529,6 +1573,102 @@ As \\textcite{knuth1984} shows.
             .find(|e| e.file.as_deref() == Some("refs.bib"))
             .unwrap_or_else(|| panic!("no error in refs.bib: {report:#?}"));
         assert!(located.line.is_some(), "{located:#?}");
+    }
+
+    // --- an empty document ---
+
+    /// The Blank template (template-registry.ts) and a new .tex file
+    /// (document-store.ts createNewFile).
+    const EMPTY_DOCUMENTS: [&str; 2] = [
+        "\\documentclass[12pt]{article}\n\\usepackage[utf8]{inputenc}\n\\usepackage[T1]{fontenc}\n\n\\begin{document}\n\n% Start writing here.\n\n\\end{document}\n",
+        "\\documentclass{article}\n\n\\begin{document}\n\n% Your content here\n\n\\end{document}\n",
+    ];
+
+    #[test]
+    fn test_an_empty_document_shows_a_blank_page_and_its_file_is_untouched() {
+        for (choice, program) in [
+            (EngineChoice::Tectonic, "tectonic"),
+            (EngineChoice::TexLive, "latexmk"),
+        ] {
+            if !have(program) {
+                eprintln!("skipped {choice:?}: {program} is not installed");
+                continue;
+            }
+            for document in EMPTY_DOCUMENTS {
+                let project = tempfile::tempdir().unwrap();
+                let main = project.path().join("main.tex");
+                std::fs::write(&main, document).unwrap();
+                for run in ["first", "second"] {
+                    let outcome = compile_project(project.path(), "main.tex", choice);
+                    let report = &outcome.report;
+                    assert!(report.ok, "{choice:?} {run}: {report:#?}");
+                    assert!(report.has_pdf, "{choice:?} {run}");
+                    assert!(outcome.pdf.is_some(), "{choice:?} {run}");
+                    assert_eq!(report.errors, [], "{choice:?} {run}");
+                    assert_eq!(std::fs::read_to_string(&main).unwrap(), document);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_an_empty_document_that_cannot_be_given_a_page_says_why() {
+        // \begin{document} is in another file, so no blank page is added.
+        if !have("tectonic") && !have("latexmk") {
+            eprintln!("skipped: no engine is installed");
+            return;
+        }
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("main.tex"),
+            "\\documentclass{article}\n\\input{body}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("body.tex"),
+            "\\begin{document}\n\\end{document}\n",
+        )
+        .unwrap();
+
+        let outcome = compile_project(project.path(), "main.tex", EngineChoice::Auto);
+        let report = &outcome.report;
+        assert!(outcome.pdf.is_none());
+        assert_eq!(
+            report.errors,
+            [CompileProblem {
+                severity: "error",
+                file: Some("main.tex".to_string()),
+                line: None,
+                message: NO_PAGES.to_string(),
+            }],
+            "{report:#?}"
+        );
+        assert!(
+            report
+                .failure_message()
+                .ends_with(&format!("main.tex: {NO_PAGES}")),
+            "{}",
+            report.failure_message()
+        );
+    }
+
+    #[test]
+    fn test_a_blank_page_goes_on_the_line_of_the_real_begin_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.tex");
+        std::fs::write(
+            &main,
+            "\\documentclass{article}\n% \\begin{document} comes below\n\\begin{document}\n\\end{document}\n",
+        )
+        .unwrap();
+        assert!(add_blank_page(&main));
+        assert_eq!(
+            std::fs::read_to_string(&main).unwrap(),
+            "\\documentclass{article}\n% \\begin{document} comes below\n\\AtEndDocument{\\null}\\begin{document}\n\\end{document}\n"
+        );
+
+        std::fs::write(&main, "\\documentclass{article}\n\\input{body}\n").unwrap();
+        assert!(!add_blank_page(&main));
     }
 
     /// Compiles the project folder named by `THELAB_COMPILE_PROJECT` through
