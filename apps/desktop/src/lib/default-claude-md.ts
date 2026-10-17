@@ -11,7 +11,7 @@ A writing workspace in The Lab. The author writes this document; you review it, 
 
 ## Environment
 
-- **LaTeX Engine**: Tectonic (handles packages and fonts automatically — no manual \`tlmgr\` needed)
+- **LaTeX Engine**: chosen per document by The Lab: TeX Live's \`latexmk\` for biblatex with biber and for LuaLaTeX, Tectonic (which fetches packages and fonts itself) otherwise. The engine menu above the PDF can fix one.
 - **Python**: Available via \`uv\` with project-local \`.venv/\`. Use \`uv pip install <pkg>\` to add packages, \`uv run <script>\` to execute.
 - **Build Directory**: \`.prism/build/\` (persistent, do not modify directly)
 - **Version History**: \`.claudeprism/\` (automatic snapshots, do not modify)
@@ -43,7 +43,8 @@ uv run python script.py                          # Run a script
 - Large documents are split with \`\\input{filename}\` or \`\\include{filename}\`.
 - Images live in a \`figures/\` directory and are referenced with \`\\includegraphics{figures/name}\`.
 - Bibliography entries go in \`references.bib\` and are cited with \`\\cite{key}\`.
-- A new package needs only \`\\usepackage{pkg}\` in the preamble — Tectonic installs it automatically.
+- With Tectonic, a new package needs only \`\\usepackage{pkg}\` in the preamble; with TeX Live it must be installed (\`tlmgr install pkg\`).
+- Compile errors, biber's included, are listed by file and line in the Problems panel.
 
 ## Scientific Skills
 
@@ -63,7 +64,7 @@ When the author asks you to make a figure with Python:
 
 ## Gotchas
 
-- Tectonic compiles with pdfTeX by default. For Unicode-heavy documents, add \`% !TEX program = xelatex\` or \`lualatex\` at the top of \`main.tex\`.
+- For Unicode-heavy documents, add \`% !TEX program = xelatex\` or \`lualatex\` at the top of \`main.tex\` (LuaLaTeX always compiles with TeX Live).
 - Do NOT create or modify files in \`.prism/\`, \`.claudeprism/\`, or \`.venv/\` — these are managed automatically.
 - When reviewing or editing LaTeX, check for matching \`\\begin{}\` / \`\\end{}\` pairs — mismatches cause hard-to-debug compile errors.
 - Large tables and figures should use \`\\begin{table}[htbp]\` / \`\\begin{figure}[htbp]\` for proper float placement.
