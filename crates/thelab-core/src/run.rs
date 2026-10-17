@@ -15,7 +15,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
@@ -210,22 +210,32 @@ impl Default for Runs {
     }
 }
 
+/// A window's run, from the moment Run is asked for: the place is taken
+/// before the interpreter is looked up, so that a window that closes
+/// meanwhile finds the run and ends it.
 struct Active {
+    /// Which call to `start` took the place.
+    start: u64,
     run_id: String,
     file: String,
     started: Instant,
-    process: Arc<Process>,
+    /// `None` while the run starts: the script has not been spawned.
+    process: Option<Arc<Process>>,
 }
 
+/// Numbers each call to `start`.
+static STARTS: AtomicU64 = AtomicU64::new(0);
+
 /// A run being ended; `wait` blocks until nothing of it is left.
-pub struct Ending(Arc<Process>);
+pub struct Ending(Option<Arc<Process>>);
 
 impl Ending {
     /// Whether the run ended within `timeout`: the script has exited and,
     /// when it was stopped, what it started has been killed with it. Only
-    /// then may the app exit, or that would be left running.
+    /// then may the app exit, or that would be left running. A run ended
+    /// while it was starting never spawned its script.
     pub fn wait(&self, timeout: Duration) -> bool {
-        self.0.wait(timeout)
+        self.0.as_ref().is_none_or(|process| process.wait(timeout))
     }
 }
 
@@ -240,12 +250,26 @@ impl Runs {
         file: &str,
         sink: Arc<dyn RunSink>,
     ) -> Result<RunStarted, String> {
-        if let Some(active) = lock(&self.active).get(owner) {
-            return Err(still_running(active));
+        let start = STARTS.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut active = lock(&self.active);
+            if let Some(running) = active.get(owner) {
+                return Err(still_running(running));
+            }
+            active.insert(
+                owner.to_string(),
+                Active {
+                    start,
+                    run_id: run_id.to_string(),
+                    file: file.trim().trim_start_matches("./").to_string(),
+                    started: Instant::now(),
+                    process: None,
+                },
+            );
         }
-        // Asking the interpreters for their versions takes a moment, so it
-        // happens before the lock is taken again.
-        let plan = plan(root, file)?;
+        // Asking the interpreter for its version takes a moment, so it
+        // happens outside the lock, with the place taken.
+        let plan = plan(root, file).inspect_err(|_| self.release(owner, start))?;
         let env = child_env(
             std::env::vars_os(),
             &crate::tools::child_path(),
@@ -253,9 +277,13 @@ impl Runs {
         );
 
         let mut active = lock(&self.active);
-        if let Some(running) = active.get(owner) {
-            return Err(still_running(running));
-        }
+        // Ended meanwhile, by `end` or `end_run`: the script never runs.
+        let Some(place) = active.get_mut(owner).filter(|a| a.start == start) else {
+            return Err(format!(
+                "{} was not run: its project or window closed while it was starting.",
+                plan.file
+            ));
+        };
         let mut command = Command::new(&plan.program);
         command
             .arg(&plan.file)
@@ -271,29 +299,28 @@ impl Runs {
             command.process_group(0);
         }
         let started = Instant::now();
-        let child = command.spawn().map_err(|e| {
-            format!(
-                "{} was not run: {} could not be started: {e}",
-                plan.file,
-                plan.program.display()
-            )
-        })?;
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                active.remove(owner);
+                return Err(format!(
+                    "{} was not run: {} could not be started: {e}",
+                    plan.file,
+                    plan.program.display()
+                ));
+            }
+        };
         let process = Arc::new(Process::new(child.id()));
-        active.insert(
-            owner.to_string(),
-            Active {
-                run_id: run_id.to_string(),
-                file: plan.file.clone(),
-                started,
-                process: Arc::clone(&process),
-            },
-        );
+        place.file = plan.file.clone();
+        place.started = started;
+        place.process = Some(Arc::clone(&process));
         drop(active);
 
         let command_line = command_line(&plan);
         watch(Watch {
             runs: self.clone(),
             owner: owner.to_string(),
+            start,
             run_id: run_id.to_string(),
             child,
             process,
@@ -310,27 +337,28 @@ impl Runs {
         })
     }
 
-    /// Whether `owner` has a script running.
+    /// Whether `owner` has a script running or starting.
     pub fn is_running(&self, owner: &str) -> bool {
         lock(&self.active).contains_key(owner)
     }
 
     /// Stops `owner`'s script: SIGINT now, SIGKILL after the grace period.
-    /// False when nothing runs or a stop is already under way.
+    /// False when nothing runs (or it is still starting) or a stop is
+    /// already under way.
     pub fn stop(&self, owner: &str) -> bool {
         let process = lock(&self.active)
             .get(owner)
-            .map(|active| Arc::clone(&active.process));
+            .and_then(|active| active.process.clone());
         process.is_some_and(|process| process.stop(self.grace))
     }
 
     /// Ends `owner`'s script because its project or window is closing:
     /// stopped as `stop` does, and forgotten at once, so the next project
-    /// can run a script straight away.
+    /// can run a script straight away. A run still starting is called off
+    /// before its script is spawned.
     pub fn end(&self, owner: &str) -> Option<Ending> {
-        let active = lock(&self.active).remove(owner)?;
-        active.process.stop(self.grace);
-        Some(Ending(active.process))
+        let ended = lock(&self.active).remove(owner)?;
+        Some(self.ending(ended))
     }
 
     /// `end`, but only if `owner`'s script is the run `run_id`: for a run
@@ -342,8 +370,14 @@ impl Runs {
         }
         let ended = active.remove(owner)?;
         drop(active);
-        ended.process.stop(self.grace);
-        Some(Ending(ended.process))
+        Some(self.ending(ended))
+    }
+
+    fn ending(&self, ended: Active) -> Ending {
+        if let Some(process) = &ended.process {
+            process.stop(self.grace);
+        }
+        Ending(ended.process)
     }
 
     /// Ends every script, for quitting the app.
@@ -352,15 +386,20 @@ impl Runs {
         owners.iter().filter_map(|owner| self.end(owner)).collect()
     }
 
-    fn forget(&self, owner: &str, run_id: &str) {
+    /// Frees `owner`'s place if the call to `start` numbered `start` still
+    /// holds it.
+    fn release(&self, owner: &str, start: u64) {
         let mut active = lock(&self.active);
-        if active.get(owner).is_some_and(|a| a.run_id == run_id) {
+        if active.get(owner).is_some_and(|a| a.start == start) {
             active.remove(owner);
         }
     }
 }
 
 fn still_running(active: &Active) -> String {
+    if active.process.is_none() {
+        return format!("{} is starting, so nothing else was started.", active.file);
+    }
     format!(
         "{} is still running (for {}), so nothing else was started. Stop it first.",
         active.file,
@@ -464,6 +503,7 @@ fn signal_group(group: u32, signal: &str) {
 struct Watch {
     runs: Runs,
     owner: String,
+    start: u64,
     run_id: String,
     child: std::process::Child,
     process: Arc<Process>,
@@ -477,6 +517,7 @@ fn watch(watch: Watch) {
     let Watch {
         runs,
         owner,
+        start,
         run_id,
         mut child,
         process,
@@ -552,7 +593,7 @@ fn watch(watch: Watch) {
         let _ = delivery.join();
         // Forgotten before the end is reported, so a Run that answers the
         // report is not refused.
-        runs.forget(&owner, &run_id);
+        runs.release(&owner, start);
         sink.finished(&run_id, run_end(status.ok(), stopped, seconds));
     });
 }

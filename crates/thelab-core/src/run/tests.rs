@@ -434,6 +434,67 @@ fn a_second_run_is_refused_while_one_runs() {
     assert_eq!(third.wait_for_end().code, Some(0));
 }
 
+/// The stand-in, slow to say its version, as a cold conda environment or
+/// a home folder on the network can be.
+const SLOW_STAND_IN: &str = "#!/bin/sh\n\
+    if [ \"$1\" = --version ]; then sleep 1; echo 'Python 3.12.4'; exit 0; fi\n\
+    exec /bin/sh \"$@\"\n";
+
+#[test]
+fn closing_the_window_while_its_run_starts_means_the_script_never_runs() {
+    let project = Project::new("close-while-starting");
+    let python = project.write(".venv/bin/python", SLOW_STAND_IN);
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+    project.write(".venv/pyvenv.cfg", "home = /usr/bin\n");
+    project.write("long.py", "touch ran\necho started\n");
+    let runs = Runs::default();
+    let start_in_background = |run_id: &'static str| {
+        let (runs, root) = (runs.clone(), project.0.clone());
+        let recorder = Arc::new(Recorder::default());
+        let sink = recorder.clone();
+        let thread =
+            std::thread::spawn(move || runs.start("window", run_id, &root, "long.py", sink));
+        (recorder, thread)
+    };
+
+    let (recorder, starting) = start_in_background("run-1");
+    std::thread::sleep(Duration::from_millis(300));
+    // The run holds its window's place while its interpreter is asked.
+    assert!(runs.is_running("window"));
+    let ending = runs.end("window").expect("the starting run to end");
+    assert!(ending.wait(PATIENCE));
+    let refused = starting.join().unwrap().unwrap_err();
+    assert_eq!(
+        refused,
+        "long.py was not run: its project or window closed while it was starting."
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!project.0.join("ran").exists(), "the script ran");
+    let seen = recorder.seen.lock().unwrap();
+    assert!(
+        seen.lines.is_empty() && seen.ends.is_empty(),
+        "{:?}",
+        seen.lines
+    );
+    drop(seen);
+    assert!(!runs.is_running("window"));
+
+    // A second Run meanwhile is refused, Stop has nothing to stop yet, and
+    // a stale run's id does not end it.
+    let (_, starting) = start_in_background("run-2");
+    std::thread::sleep(Duration::from_millis(300));
+    let (_, again) = start(&runs, &project, "long.py");
+    assert_eq!(
+        again.unwrap_err(),
+        "long.py is starting, so nothing else was started."
+    );
+    assert!(!runs.stop("window"));
+    assert!(runs.end_run("window", "run-1").is_none());
+    assert!(runs.end_run("window", "run-2").is_some());
+    assert!(starting.join().unwrap().is_err());
+    assert!(!project.0.join("ran").exists(), "the script ran");
+}
+
 #[test]
 fn closing_the_project_ends_its_run() {
     let project = Project::with_venv("close");
