@@ -4,6 +4,7 @@ The Lab is a fork of ClaudePrism (`upstream`: delibae/claude-prism): a Tauri 2 d
 
 ## Rules
 - **Claude checks; it does not ghostwrite.** In the app, Claude asks before it acts, reviews and answers, and edits only when the user asks. Keep defaults that way.
+- **Permission prompts:** the chat runs `claude -p --input-format stream-json --permission-mode default --permission-prompt-tool stdio`, never `--dangerously-skip-permissions`. `claude_control.rs` builds and reads the control lines; `claude_process.rs` keeps each tab's stdin open until the run's `result`; the chat's cards are `permission-store.ts` and `permission-request-card.tsx`.
 - **Stay mergeable with upstream.** Change visible branding to The Lab; leave internal names alone (`@claude-prism/*` packages, crate and module names, storage paths). `git fetch upstream` and merge their fixes; pushing to `upstream` is disabled on purpose.
 - **Never push or publish without Luke's word.** The repository is public.
 - **Auto-update is off.** The updater has no endpoints and creates no artifacts, until The Lab has its own signing key and releases. ClaudePrism's endpoint would replace The Lab with ClaudePrism.
@@ -32,4 +33,5 @@ npx -y pnpm@10.28.2 --filter=@claude-prism/desktop tauri build --debug --bundles
 ## Checks
 - `npx -y pnpm@10.28.2 --filter=@claude-prism/desktop test` (vitest) and `npx -y pnpm@10.28.2 lint` (biome)
 - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`
+- `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml live_permission_probe -- --ignored --nocapture` runs the real `claude` once with haiku to check the permission protocol end to end. It spends tokens: run it only when that code or the CLI version changes, with `CLAUDECODE` unset.
 - Verify behaviour in the running app; Luke does the visual QA.
