@@ -62,7 +62,7 @@ function backend(start?: (args: Record<string, unknown>) => unknown) {
       return {
         runId: a.runId,
         file: a.file,
-        interpreter: "/Users/lukewaszyn/opt/openEMS/venv/bin/python",
+        interpreter: "/Users/dev/opt/openEMS/venv/bin/python",
         folder: "sim",
         command: `~/opt/openEMS/venv/bin/python ${a.file}`,
       };
@@ -208,14 +208,14 @@ describe("Run and the Output panel", () => {
 
   it("shows the backend's reason when the interpreter has a problem", async () => {
     backend(() => {
-      throw 'bowtie.py was not run: /Users/lukewaszyn/opt/openEMS/venv/bin/python does not exist (folders."sim" in thelab.toml)';
+      throw 'bowtie.py was not run: /Users/dev/opt/openEMS/venv/bin/python does not exist (folders."sim" in thelab.toml)';
     });
 
     await usePythonRunStore.getState().run();
 
     expect(usePythonRunStore.getState().status).toBe("idle");
     expect(shown()).toEqual([
-      'meta:bowtie.py was not run: /Users/lukewaszyn/opt/openEMS/venv/bin/python does not exist (folders."sim" in thelab.toml)',
+      'meta:bowtie.py was not run: /Users/dev/opt/openEMS/venv/bin/python does not exist (folders."sim" in thelab.toml)',
     ]);
   });
 

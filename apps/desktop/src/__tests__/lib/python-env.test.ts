@@ -24,23 +24,23 @@ function interpreter(
 
 /** Luke's thesis, as the drafted thelab.toml maps it. */
 const thesis: PythonMap = {
-  root: "/Users/lukewaszyn/lunar-sdr-gpr",
+  root: "/Users/dev/radar-thesis",
   default: interpreter(),
   folders: [
     {
       folder: "sim",
       ...interpreter({
-        path: "/Users/lukewaszyn/opt/openEMS/venv/bin/python",
+        path: "/Users/dev/opt/openEMS/venv/bin/python",
         configured: "~/opt/openEMS/venv/bin/python",
-        virtualEnv: "/Users/lukewaszyn/opt/openEMS/venv",
+        virtualEnv: "/Users/dev/opt/openEMS/venv",
       }),
     },
     {
       folder: "src/lunar_gpr/ml",
       ...interpreter({
-        path: "/Users/lukewaszyn/opt/gpr-ml/bin/python",
+        path: "/Users/dev/opt/gpr-ml/bin/python",
         configured: "~/opt/gpr-ml/bin/python",
-        virtualEnv: "/Users/lukewaszyn/opt/gpr-ml",
+        virtualEnv: "/Users/dev/opt/gpr-ml",
       }),
     },
   ],
@@ -81,7 +81,7 @@ describe("the interpreter of the open file", () => {
     const sim = describeInterpreter(interpreterFor(thesis, "sim/run.py"));
     expect(sim.problem).toBe(false);
     expect(sim.detail).toBe(
-      "/Users/lukewaszyn/opt/openEMS/venv/bin/python\nchosen by thelab.toml, for sim/",
+      "/Users/dev/opt/openEMS/venv/bin/python\nchosen by thelab.toml, for sim/",
     );
     const tools = describeInterpreter(interpreterFor(thesis, "tools/x.py"));
     expect(tools.detail).toBe(
@@ -103,7 +103,7 @@ describe("the interpreter of the open file", () => {
         path: null,
         version: null,
         problem:
-          '/Users/lukewaszyn/opt/openEMS/venv/bin/python does not exist (folders."sim" in thelab.toml)',
+          '/Users/dev/opt/openEMS/venv/bin/python does not exist (folders."sim" in thelab.toml)',
       }),
     });
     expect(broken.problem).toBe(true);
