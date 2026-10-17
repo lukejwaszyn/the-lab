@@ -445,6 +445,37 @@ fn a_long_output_path_wrapped_at_column_79_is_rejoined() {
 }
 
 #[test]
+fn pdftex_quotes_an_output_path_with_a_space_and_the_quotes_are_not_the_name() {
+    // A main file named "my thesis.tex" with an error pdflatex continues
+    // past, run as thelab runs latexmk: `Output written on "build/my
+    // thesis.pdf" (1 page, 23668 bytes).`
+    let log = parse_tex_log(&fixture("latexmk/spaced-name.log"));
+    assert_eq!(
+        log.output,
+        Some(OutputFile {
+            file: "build/my thesis.pdf".to_string(),
+            pages: 1,
+            bytes: Some(23668),
+        })
+    );
+}
+
+#[test]
+fn a_quoted_absolute_output_path_wrapped_at_column_79_is_rejoined() {
+    // The same file in a subfolder of "a folder": the build folder is
+    // outside the folder latexmk ran in, so the log names it absolutely.
+    let log = parse_tex_log(&fixture("latexmk/spaced-folder.log"));
+    assert_eq!(
+        log.output,
+        Some(OutputFile {
+            file: "/private/tmp/thelab-fixtures/a folder/build/my thesis.pdf".to_string(),
+            pages: 1,
+            bytes: Some(23668),
+        })
+    );
+}
+
+#[test]
 fn a_document_with_an_empty_body_has_no_pages_and_no_errors() {
     // What the Blank template and every new .tex file start as.
     for variant in ["tectonic", "pdflatex", "pdflatex-file-line-error"] {

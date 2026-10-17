@@ -441,10 +441,15 @@ fn skip_until_blank(lines: &[String], start: usize, limit: usize) -> usize {
 
 /// `Output written on build/main.pdf (9 pages, 69744 bytes).`, or
 /// `(1 page).` when XeTeX writes the PDF itself. The path may hold spaces
-/// and parentheses, so the counts are taken from the end.
+/// and parentheses, so the counts are taken from the end. pdfTeX puts a
+/// path with a space in double quotes, which are not part of the name.
 fn parse_output_line(line: &str) -> Option<OutputFile> {
     let rest = line.strip_prefix("Output written on ")?;
     let (file, counts) = rest.trim_end().strip_suffix(").")?.rsplit_once(" (")?;
+    let file = file
+        .strip_prefix('"')
+        .and_then(|file| file.strip_suffix('"'))
+        .unwrap_or(file);
     let mut parts = counts.split(", ");
     let pages = parts.next()?;
     let pages = pages

@@ -93,6 +93,41 @@ for dir in "$here"/biblatex-projects/*/; do
     run_latexmk_project "$(basename "$dir")" "$dir"
 done
 
+# Names with a space. TeX prints such a name as it is when it opens the file
+# ("(./my thesis.tex"), LuaTeX puts it in double quotes, and pdfTeX quotes
+# it in "Output written on". First a main file named "my thesis.tex", run as
+# thelab runs Tectonic, and latexmk with pdflatex and with lualatex. In a new
+# TEXMFVAR, LuaTeX's first run builds its font database and its log says so:
+# run the script again before committing.
+spaced=$here/spaced-names
+rm -rf "$work/s" && cp -R "$spaced" "$work/s" && mkdir -p "$work/s/build"
+(cd "$work/s" && tectonic -X compile "my thesis.tex" --synctex --keep-logs --outdir build \
+    >/dev/null 2>"$logs/tectonic/spaced-name.stderr.txt")
+echo "tectonic  spaced-name: exit $?"
+cp "$work/s/build/my thesis.log" "$logs/tectonic/spaced-name.log"
+for program in pdf lualatex; do
+    rm -rf "$work/s" && cp -R "$spaced" "$work/s"
+    (cd "$work/s" && latexmk -$program -interaction=nonstopmode -file-line-error -synctex=1 \
+        -outdir=build "my thesis.tex" >/dev/null 2>&1)
+    echo "latexmk -$program  spaced-name: exit $?"
+    case $program in
+    pdf) name=spaced-name ;;
+    *) name=spaced-name-$program ;;
+    esac
+    cp "$work/s/build/my thesis.log" "$logs/latexmk/$name.log"
+done
+# Then the same file in a subfolder of a folder with a space: the build
+# folder is outside the folder latexmk runs in, so the log names it by its
+# absolute path, in a fixed folder that the tests name.
+fixed=/tmp/thelab-fixtures
+folder="$fixed/a folder"
+rm -rf "$fixed" && mkdir -p "$folder" && cp -R "$spaced" "$folder/src"
+(cd "$folder/src" && latexmk -pdf -interaction=nonstopmode -file-line-error -synctex=1 \
+    "-outdir=$folder/build" "my thesis.tex" >/dev/null 2>&1)
+echo "latexmk  spaced-folder: exit $?"
+cp "$folder/build/my thesis.log" "$logs/latexmk/spaced-folder.log"
+rm -rf "$fixed"
+
 # SyncTeX data for the example thesis, from both engines. SyncTeX records
 # absolute paths, so this runs in a fixed folder: the tests name it.
 sync=/tmp/change-fixtures-thesis
