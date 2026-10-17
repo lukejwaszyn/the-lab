@@ -767,3 +767,44 @@ fn how_a_run_ended_is_said_plainly() {
     );
     assert_eq!(run_end(None, false, 2.0).summary, "[ended after 2.0 s]");
 }
+
+/// The same with a real Python: prints show as they happen, a progress bar
+/// redraws its line, and Stop raises KeyboardInterrupt in the script.
+/// `cargo test -p thelab-core real_python -- --ignored`; needs python3.
+#[test]
+#[ignore]
+fn real_python_streams_and_stops() {
+    let python = crate::tools::find_program("python3").expect("python3");
+    let project = Project::new("real");
+    project.write(
+        "thelab.toml",
+        &format!("[python]\ninterpreter = \"{}\"\n", python.display()),
+    );
+    project.write(
+        "simulate.py",
+        "import sys, time\n\
+         for i in range(1, 4):\n    sys.stderr.write(f'\\r{i * 33}%')\n    time.sleep(0.1)\n\
+         sys.stderr.write('\\n')\n\
+         print('ready')\n\
+         try:\n    time.sleep(60)\n\
+         except KeyboardInterrupt:\n    print('interrupted, saving')\n    sys.exit(130)\n",
+    );
+    let runs = Runs::default();
+
+    let (recorder, started) = start(&runs, &project, "simulate.py");
+    started.unwrap();
+    recorder.wait_for_line("ready");
+    assert!(runs.stop("window"));
+    let end = recorder.wait_for_end();
+
+    assert_eq!(
+        recorder.script_lines(),
+        [
+            (Stream::Err, "99%".to_string()),
+            (Stream::Out, "ready".to_string()),
+            (Stream::Out, "interrupted, saving".to_string()),
+        ]
+    );
+    assert!(end.stopped);
+    assert_eq!(end.code, Some(130));
+}
