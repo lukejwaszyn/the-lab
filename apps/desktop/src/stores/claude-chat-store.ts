@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useDocumentStore } from "./document-store";
 import { useHistoryStore } from "./history-store";
 import { useClaudeSetupStore } from "./claude-setup-store";
+import { usePermissionStore } from "./permission-store";
 import { createLogger } from "@/lib/debug/logger";
 
 const log = createLogger("claude");
@@ -1140,6 +1141,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     const tab = get().tabs.find((t) => t.id === activeTabId);
     if (!tab?.isStreaming) return;
     set({ _cancelledByUser: true });
+    usePermissionStore.getState().clearPending(activeTabId);
     set((s) =>
       applyTabUpdate(s, activeTabId, {
         isStreaming: false,
@@ -1185,6 +1187,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       selectedCredentialForProviderKey(tab.providerKey) ??
       CLAUDE_CODE_PROVIDER_ID;
     persistSelectedProviderCredentialId(nextSelectedProviderCredentialId);
+    usePermissionStore.getState().reset();
 
     set({
       tabs: [tab],
@@ -1238,6 +1241,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       return;
     }
 
+    usePermissionStore.getState().forgetTab(activeTabId);
     set((s) => ({
       ...applyTabUpdate(s, activeTabId, {
         messages: [],
@@ -1329,6 +1333,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     }
 
     // Reset state with new session ID
+    if (
+      get().tabs.find((tab) => tab.id === activeTabId)?.sessionId !== sessionId
+    ) {
+      usePermissionStore.getState().forgetTab(activeTabId);
+    }
     set((s) => ({
       ...applyTabUpdate(s, activeTabId, {
         messages: [],
@@ -1449,6 +1458,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     if (idx === -1) return;
 
     const newTabs = state.tabs.filter((t) => t.id !== tabId);
+    usePermissionStore.getState().forgetTab(tabId);
 
     if (tabId === state.activeTabId) {
       // Switch to adjacent tab

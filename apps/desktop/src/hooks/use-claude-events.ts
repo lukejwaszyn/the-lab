@@ -11,7 +11,12 @@ import { useDocumentStore } from "@/stores/document-store";
 import { useHistoryStore } from "@/stores/history-store";
 import { useProposedChangesStore } from "@/stores/proposed-changes-store";
 import { useSettingsStore } from "@/stores/settings-store";
+import { usePermissionStore } from "@/stores/permission-store";
 import { readTexFileContent } from "@/lib/tauri/fs";
+import {
+  parsePermissionRequest,
+  UI_PAUSE_TOOLS,
+} from "@/lib/permission-requests";
 import {
   compileLatex,
   resolveCompileTarget,
@@ -197,6 +202,31 @@ export function useClaudeEvents() {
       const gap = lastTime ? ((now - lastTime) / 1000).toFixed(1) : "0";
       lastMsgTimeRef.current.set(tabId, now);
 
+      // The Lab: Claude asks before it acts. A permission request becomes a
+      // card in the chat (the backend keeps the request and writes the
+      // answer); it is not a chat message.
+      const streamType = (msg as { type: string }).type;
+      if (streamType === "control_request") {
+        const request = parsePermissionRequest(
+          msg,
+          useDocumentStore.getState().projectRoot,
+        );
+        if (request && !UI_PAUSE_TOOLS.has(request.toolName)) {
+          const outcome = usePermissionStore.getState().receive(tabId, request);
+          log.info(
+            `[${tabId}] ${elapsed(tabId)} permission request ${request.toolName}: ${outcome}`,
+          );
+        }
+        return;
+      }
+      if (streamType === "control_cancel_request") {
+        const requestId = (msg as { request_id?: unknown }).request_id;
+        if (typeof requestId === "string") {
+          usePermissionStore.getState().withdraw(tabId, requestId);
+        }
+        return;
+      }
+
       // Log ALL message types with gap detection
       const contentTypes =
         msg.message?.content?.map((b: any) => b.type).join(",") ?? "";
@@ -356,6 +386,9 @@ export function useClaudeEvents() {
         `[${tabId}] complete success=${success} (${count} messages) cancelledForAsk=${cancelledForAskRef.current.get(tabId) ?? false}`,
       );
       const chatStore = useClaudeChatStore.getState();
+
+      // A request still waiting when the run stops just disappears.
+      usePermissionStore.getState().clearPending(tabId);
 
       // Guard against duplicate complete events
       const tab = chatStore.tabs.find((t) => t.id === tabId);

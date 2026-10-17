@@ -13,7 +13,12 @@ import {
 } from "@/stores/claude-chat-store";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
+import {
+  selectPendingRequests,
+  usePermissionStore,
+} from "@/stores/permission-store";
 import { MarkdownRenderer } from "./markdown-renderer";
+import { PermissionRequestCard } from "./permission-request-card";
 import { ThinkingWidget, ToolWidget } from "./tool-widgets";
 
 // ─── Streaming Indicator (isolated to prevent re-render storms) ───
@@ -112,6 +117,10 @@ export const ChatMessages: FC = () => {
   const messages = useClaudeChatStore((s) => s.messages) ?? [];
   const isStreaming = useClaudeChatStore((s) => s.isStreaming);
   const streamingStartedAt = useClaudeChatStore((s) => s.streamingStartedAt);
+  const activeTabId = useClaudeChatStore((s) => s.activeTabId);
+  const permissionRequests = usePermissionStore(
+    selectPendingRequests(activeTabId),
+  );
   const queuedGuidance =
     useClaudeChatStore(
       (s) => s.tabs.find((tab) => tab.id === s.activeTabId)?.queuedGuidance,
@@ -184,7 +193,7 @@ export const ChatMessages: FC = () => {
         behavior: "smooth",
       });
     }
-  }, [displayMessages, pendingGuidance]);
+  }, [displayMessages, pendingGuidance, permissionRequests]);
 
   // Reset auto-scroll when streaming stops
   useEffect(() => {
@@ -227,6 +236,16 @@ export const ChatMessages: FC = () => {
           <MessageBubble message={msg} toolResultMap={toolResultMap} />
         </div>
       ))}
+
+      {isStreaming &&
+        permissionRequests.map((request) => (
+          <div
+            key={request.requestId}
+            className={cn("mx-auto w-full px-2", THREAD_MAX_WIDTH)}
+          >
+            <PermissionRequestCard tabId={activeTabId} request={request} />
+          </div>
+        ))}
 
       {isStreaming && (
         <div className={cn("mx-auto w-full px-2", THREAD_MAX_WIDTH)}>
