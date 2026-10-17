@@ -377,6 +377,7 @@ fn project_modified_ms(dir: &Path) -> u64 {
     for relative in [
         "main.tex",
         "document.tex",
+        ".prism/build/build/main.pdf",
         ".prism/build/main.pdf",
         ".claudeprism/history.git/.git/refs/heads/master",
     ] {

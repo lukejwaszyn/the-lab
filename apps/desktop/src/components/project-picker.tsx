@@ -678,6 +678,10 @@ async function loadProjectPreview(
   const promise = (async () => {
     const createdAt = await getProjectCreatedAt(project.path);
     const pdfPath = await firstExistingPath(project.path, [
+      // thelab_core writes into build/ inside the .prism/build copy.
+      [".prism", "build", "build", "main.pdf"],
+      [".prism", "build", "build", "document.pdf"],
+      // Where ClaudePrism's embedded Tectonic left it.
       [".prism", "build", "main.pdf"],
       [".prism", "build", "document.pdf"],
       ["main.pdf"],
