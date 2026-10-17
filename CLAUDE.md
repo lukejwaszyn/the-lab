@@ -2,13 +2,15 @@
 
 The Lab is a fork of ClaudePrism (`upstream`: delibae/claude-prism): a Tauri 2 desktop app with a Rust backend in `apps/desktop/src-tauri` and a React frontend in `apps/desktop/src`. The fork's plan, milestones F1 to F4, is in Luke's plan file `the-lab-fork.md` and in this repository's commits.
 
-The Lab's own Rust crates are in `crates/` (their own Cargo workspace, `crates/Cargo.toml`, from github.com/lukejwaszyn/the-lab-native, MIT): `thelab-core` (scanning, log parsing, compile driving, SyncTeX, the bibliography, Python per folder) and `thelab` (the CLI and the MCP server that Claude Code runs as the user-scope server `thelab`). The repository root has no Cargo workspace, so src-tauri keeps its own and takes `thelab-core` by path.
+The Lab's own Rust crates are in `crates/` (their own Cargo workspace, `crates/Cargo.toml`, from github.com/lukejwaszyn/the-lab-native, MIT): `thelab-core` (scanning, log parsing, compile driving, SyncTeX, the bibliography, Python per folder, and `run`, the engine behind the app's Run command) and `thelab` (the CLI and the MCP server that Claude Code runs as the user-scope server `thelab`). The repository root has no Cargo workspace, so src-tauri keeps its own and takes `thelab-core` by path.
 
 ## Rules
 - **Claude checks; it does not ghostwrite.** In the app, Claude asks before it acts, reviews and answers, and edits only when the user asks. Keep defaults that way.
 - **Permission prompts:** the chat runs `claude -p --input-format stream-json --permission-mode default --permission-prompt-tool stdio`, never `--dangerously-skip-permissions`. `claude_control.rs` builds and reads the control lines; `claude_process.rs` keeps each tab's stdin open until the run's `result`; the chat's cards are `permission-store.ts` and `permission-request-card.tsx`.
 - **Stay mergeable with upstream.** Change visible branding to The Lab; leave internal names alone (`@claude-prism/*` packages, crate and module names, storage paths). `git fetch upstream` and merge their fixes; pushing to `upstream` is disabled on purpose.
 - **Never push or publish without Luke's word.** The repository is public.
+- **Opening a project changes nothing in it.** ClaudePrism made a uv `.venv` on every open; a stray `.venv` shadows the interpreters `thelab.toml` names. A venv is made only from the Python Environment dialog's Setup .venv, and `uv-setup-store.test.ts` fails if anything else calls `setupVenv`.
+- **Run (⌘R) never stops a script; Stop (⌘.) does.** One script per window, from the project root, with the interpreter `thelab.toml` names for its folder (`thelab_core::run`, `python_run.rs`, `python-run-store.ts`, `output-panel.tsx`). Closing or switching the project, closing the window or quitting ends it, so no process is left behind.
 - **Auto-update is off.** The updater has no endpoints and creates no artifacts, until The Lab has its own signing key and releases. ClaudePrism's endpoint would replace The Lab with ClaudePrism.
 - **License:** the code is MIT, but the app bundles MuPDF (AGPL), so the app as distributed is AGPL.
 
@@ -34,8 +36,9 @@ npx -y pnpm@10.28.2 --filter=@claude-prism/desktop tauri build --debug --bundles
 ## Checks
 - `npx -y pnpm@10.28.2 --filter=@claude-prism/desktop test` (vitest) and `npx -y pnpm@10.28.2 lint` (biome)
 - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`
-- `CARGO_TARGET_DIR=apps/desktop/src-tauri/target cargo test --manifest-path crates/Cargo.toml` (the crates' tests; the compile tests run the real engines when installed)
+- `CARGO_TARGET_DIR=apps/desktop/src-tauri/target cargo test --manifest-path crates/Cargo.toml` (the crates' tests; the compile tests run the real engines when installed); `real_python_streams_and_stops -- --ignored` runs Run with the installed python3
 - `THELAB_COMPILE_PROJECT=<a copy of a project> cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml compile_a_named_project -- --ignored --nocapture` compiles a project exactly as the app does and prints the report (it writes `.prism/` into the folder, so use a copy). `THELAB_EXPECT_BIB_ERROR=1` expects an error located in a `.bib` file.
 - After changing `crates/`, reinstall the MCP server: `cargo install --path crates/thelab`, then `claude mcp get thelab`.
+- `THELAB_PYTHON_PROJECT=<folder> THELAB_PYTHON_FILES="sim/a.py tools/b.py" cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml python_map_of_a_named_project -- --ignored --nocapture` prints a project's interpreter map and the interpreter of each file named, as the app sees them. It only reads.
 - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml live_permission_probe -- --ignored --nocapture` runs the real `claude` once with haiku to check the permission protocol end to end. It spends tokens: run it only when that code or the CLI version changes, with `CLAUDECODE` unset.
 - Verify behaviour in the running app; Luke does the visual QA.
