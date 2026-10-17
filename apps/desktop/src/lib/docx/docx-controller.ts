@@ -1,0 +1,549 @@
+/**
+ * The Lab: one Word tab's document. It reads the file, hands its bytes to
+ * SuperDoc as a File, tracks unsaved edits, saves (keeping what was not
+ * edited byte for byte, `preserve.ts`), and watches the file on disk: a
+ * change made elsewhere reloads a tab with no unsaved edits and asks about
+ * one with them, and Word's owner file beside it means Word has it open.
+ */
+import { invoke } from "@tauri-apps/api/core";
+import { readFile } from "@tauri-apps/plugin-fs";
+import type { SuperDoc } from "superdoc";
+import { createLogger } from "@/lib/debug/logger";
+import type { DocxMode } from "@/stores/docx-store";
+import type { DocxSession } from "./docx-session";
+import { loadSuperDoc } from "./superdoc-loader";
+
+const log = createLogger("docx");
+
+export const DOCX_MIME =
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+export const EQUATION_NOTE =
+  "Equations can't be edited here. Edit them in Word, or write the math in LaTeX.";
+export const OPEN_IN_WORD_NOTE =
+  "This file is open in Word. Editing it in both places will conflict.";
+export const READ_ONLY_NOTE =
+  "This file is read-only, so it opens for reading only.";
+
+/** What `docx_file_state` says about the file on disk. */
+export interface DocxFileState {
+  exists: boolean;
+  modifiedMs: number | null;
+  size: number;
+  openInWord: boolean;
+  readOnly: boolean;
+}
+
+export interface DocxTabState {
+  phase: "loading" | "ready" | "error";
+  /** Why the file could not be opened. */
+  error: string | null;
+  /** Why the last save failed. */
+  saveError: string | null;
+  dirty: boolean;
+  saving: boolean;
+  /** The file changed on disk while the tab had unsaved edits. */
+  changedOnDisk: boolean;
+  openInWord: boolean;
+  /** The file cannot be written, so it opens in Viewing. */
+  readOnly: boolean;
+  /** An edit inside an equation was refused. */
+  equationNote: boolean;
+}
+
+export const INITIAL_TAB_STATE: DocxTabState = {
+  phase: "loading",
+  error: null,
+  saveError: null,
+  dirty: false,
+  saving: false,
+  changedOnDisk: false,
+  openInWord: false,
+  readOnly: false,
+  equationNote: false,
+};
+
+export type DiskDecision = "none" | "reload" | "ask";
+
+/**
+ * What a tab does when it looks at its file again (the window regained
+ * focus, or the files were refreshed, as after each Claude run): nothing
+ * while the file has the time it had when the tab read or wrote it,
+ * otherwise reload a tab with no unsaved edits and ask about one with them.
+ */
+export function decideOnDiskChange(
+  knownModifiedMs: number | null,
+  disk: DocxFileState,
+  dirty: boolean,
+): DiskDecision {
+  if (!disk.exists || disk.modifiedMs == null || knownModifiedMs == null) {
+    return "none";
+  }
+  if (disk.modifiedMs === knownModifiedMs) return "none";
+  return dirty ? "ask" : "reload";
+}
+
+/** Whether SuperDoc's exception is an edit refused inside an equation. */
+export function isEquationEditError(payload: unknown): boolean {
+  const error = (payload as { error?: unknown } | null)?.error ?? payload;
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+  return /math|equation|omml/i.test(message);
+}
+
+export function fileState(path: string): Promise<DocxFileState> {
+  return invoke<DocxFileState>("docx_file_state", { path });
+}
+
+export function saveDocxBytes(
+  path: string,
+  bytes: Uint8Array,
+): Promise<DocxFileState> {
+  return invoke<DocxFileState>("docx_save", bytes, {
+    headers: { path: encodeURIComponent(path) },
+  });
+}
+
+async function exportDocx(sd: SuperDoc): Promise<Uint8Array> {
+  const blob = await sd.export({
+    exportType: ["docx"],
+    commentsType: "external",
+    isFinalDoc: false,
+    triggerDownload: false,
+  });
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+/** The node types SuperDoc gives Word's equations. */
+const MATH_NODES = new Set(["mathInline", "mathBlock"]);
+
+interface PmNode {
+  type: { name: string };
+  nodeSize: number;
+  descendants(f: (node: PmNode) => boolean | undefined): void;
+  nodesBetween(
+    from: number,
+    to: number,
+    f: (node: PmNode) => boolean | undefined,
+  ): void;
+}
+interface PmStep {
+  from?: number;
+  to?: number;
+}
+interface PmTransaction {
+  docChanged: boolean;
+  /** The document before the transaction. */
+  before: PmNode;
+  steps: PmStep[];
+  docs: PmNode[];
+  doc: PmNode;
+  getMeta(key: string): unknown;
+}
+
+function countMath(doc: PmNode): number {
+  let n = 0;
+  doc.descendants((node) => {
+    if (MATH_NODES.has(node.type.name)) n++;
+    return true;
+  });
+  return n;
+}
+
+/**
+ * Whether `tr` removes an equation. SuperDoc shows Word's equations but
+ * cannot edit them: selecting one and typing would replace it. Undo and
+ * redo may.
+ */
+export function removesEquation(tr: PmTransaction, before: PmNode): boolean {
+  if (!tr.docChanged || tr.getMeta("history$") !== undefined) return false;
+  let touches = false;
+  tr.steps.forEach((step, i) => {
+    if (touches || step.from == null || step.to == null) return;
+    if (step.to <= step.from) return;
+    tr.docs[i]?.nodesBetween(step.from, step.to, (node) => {
+      if (MATH_NODES.has(node.type.name)) touches = true;
+      return !touches;
+    });
+  });
+  return touches && countMath(tr.doc) < countMath(before);
+}
+
+export interface DocxControllerOptions {
+  absolutePath: string;
+  name: string;
+  editor: HTMLElement;
+  /** The id of the element SuperDoc puts its toolbar in. */
+  toolbarId: string;
+  mode: DocxMode;
+  author: string;
+  onChange: (state: DocxTabState) => void;
+  /** SuperDoc changed the mode itself (from its own menu). */
+  onModeChange?: (mode: DocxMode) => void;
+}
+
+/** How long a document may take to open before the tab gives up. */
+export const OPEN_TIMEOUT_MS = 60_000;
+
+export class DocxController implements DocxSession {
+  readonly absolutePath: string;
+  state: DocxTabState = { ...INITIAL_TAB_STATE };
+
+  private readonly options: DocxControllerOptions;
+  private sd: SuperDoc | null = null;
+  /** The bytes on disk, as last read or written. */
+  private original: Uint8Array | null = null;
+  /** SuperDoc's export of `original`, taken when it loaded. */
+  private baseline: Uint8Array | null = null;
+  /** Doc-changing transactions since the document loaded. */
+  private changes = 0;
+  /** `changes` when the file was last read or written. */
+  private savedChanges = 0;
+  private knownModifiedMs: number | null = null;
+  private mode: DocxMode;
+  private readOnly = false;
+  private generation = 0;
+  private discarded = false;
+  private closed = false;
+  private saving: Promise<boolean> | null = null;
+  private noteTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(options: DocxControllerOptions) {
+    this.options = options;
+    this.absolutePath = options.absolutePath;
+    this.mode = options.mode;
+  }
+
+  private update(patch: Partial<DocxTabState>) {
+    this.state = { ...this.state, ...patch };
+    this.options.onChange(this.state);
+  }
+
+  isDirty(): boolean {
+    return !this.discarded && this.changes !== this.savedChanges;
+  }
+
+  private noteChange() {
+    this.changes++;
+    if (!this.state.dirty) this.update({ dirty: true });
+  }
+
+  /** Reads the file and shows it. */
+  async open(): Promise<void> {
+    const generation = ++this.generation;
+    this.changes = 0;
+    this.savedChanges = 0;
+    this.update({ ...INITIAL_TAB_STATE });
+    try {
+      const [bytes, disk] = await Promise.all([
+        readFile(this.absolutePath),
+        fileState(this.absolutePath),
+      ]);
+      const { SuperDoc, Extensions } = await loadSuperDoc();
+      if (generation !== this.generation || this.closed) return;
+      this.destroyEditor();
+      this.original = new Uint8Array(bytes);
+      this.baseline = null;
+      this.changes = 0;
+      this.savedChanges = 0;
+      this.knownModifiedMs = disk.modifiedMs;
+      this.readOnly = disk.readOnly;
+      this.update({ openInWord: disk.openInWord, readOnly: disk.readOnly });
+
+      let ready = false;
+      const sd = await new Promise<SuperDoc>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("SuperDoc did not finish opening the file")),
+          OPEN_TIMEOUT_MS,
+        );
+        const file = new File([this.original as BlobPart], this.options.name, {
+          type: DOCX_MIME,
+        });
+        this.sd = new SuperDoc({
+          selector: this.options.editor,
+          toolbar: `#${this.options.toolbarId}`,
+          document: file,
+          documentMode: this.readOnly ? "viewing" : this.mode,
+          role: "editor",
+          user: { name: this.options.author.trim() || "Author", email: "" },
+          // SuperDoc reports each opened document to its makers unless told not to.
+          telemetry: { enabled: false },
+          contained: true,
+          modules: {
+            toolbar: {
+              // The tab's own toolbar picks the mode; Claude is the app's AI.
+              excludeItems: ["documentMode", "ai"],
+              responsiveToContainer: true,
+            },
+          },
+          onReady: ({ superdoc }) => {
+            ready = true;
+            clearTimeout(timer);
+            resolve(superdoc);
+          },
+          onTransaction: (event) => {
+            // SuperDoc reports every transaction, a refused one too (as by
+            // the equation guard); only one that changed the document counts.
+            const tr = event?.transaction as unknown as
+              | PmTransaction
+              | undefined;
+            const editor = (event?.sourceEditor ?? event?.editor) as
+              | { state?: { doc?: unknown } }
+              | undefined;
+            if (
+              ready &&
+              generation === this.generation &&
+              tr?.docChanged &&
+              editor?.state?.doc !== tr.before
+            ) {
+              this.noteChange();
+            }
+          },
+          onException: (payload) => {
+            if (!ready && "stage" in (payload ?? {})) {
+              clearTimeout(timer);
+              reject(payload.error);
+            } else {
+              this.onException(payload);
+            }
+          },
+          onContentError: ({ error }) => {
+            if (!ready) {
+              clearTimeout(timer);
+              reject(error);
+            } else {
+              log.warn("SuperDoc content error", { error: String(error) });
+            }
+          },
+        });
+      });
+      if (generation !== this.generation || this.closed) {
+        sd.destroy();
+        return;
+      }
+      sd.on("document-mode-change", (payload) => {
+        const mode = (payload as { documentMode?: DocxMode })?.documentMode;
+        if (mode && mode !== this.mode && !this.readOnly) {
+          this.mode = mode;
+          this.options.onModeChange?.(mode);
+        }
+      });
+      this.guardEquations(sd, Extensions);
+      this.update({ phase: "ready" });
+      await this.takeBaseline(sd, generation);
+    } catch (err) {
+      if (generation !== this.generation) return;
+      log.error("A Word file could not be opened", {
+        path: this.absolutePath,
+        error: String(err),
+      });
+      this.update({
+        phase: "error",
+        error: "This file could not be opened as a Word document.",
+      });
+    }
+  }
+
+  /**
+   * SuperDoc's export of the file as it loaded, which a save compares with
+   * the edited export to find what changed. An edit while it is taken would
+   * blur that line, so then there is none, and a save writes SuperDoc's
+   * whole export.
+   */
+  private async takeBaseline(sd: SuperDoc, generation: number) {
+    const before = this.changes;
+    try {
+      const baseline = await exportDocx(sd);
+      if (generation === this.generation && this.changes === before) {
+        this.baseline = baseline;
+      }
+    } catch (err) {
+      log.warn("No baseline export", { error: String(err) });
+    }
+  }
+
+  private guardEquations(
+    sd: SuperDoc,
+    Extensions: Awaited<ReturnType<typeof loadSuperDoc>>["Extensions"],
+  ) {
+    const editor = sd.activeEditor;
+    if (!editor) return;
+    try {
+      const plugin = new Extensions.Plugin({
+        key: new Extensions.PluginKey("thelabEquationGuard"),
+        filterTransaction: (tr, state) => {
+          if (
+            removesEquation(
+              tr as unknown as PmTransaction,
+              state.doc as unknown as PmNode,
+            )
+          ) {
+            this.showEquationNote();
+            return false;
+          }
+          return true;
+        },
+      });
+      editor.registerPlugin(plugin);
+    } catch (err) {
+      log.warn("Could not guard equations", { error: String(err) });
+    }
+  }
+
+  private onException(payload: unknown) {
+    if (isEquationEditError(payload)) {
+      this.showEquationNote();
+      return;
+    }
+    // Never a raw error in the tab; the log keeps it.
+    log.warn("SuperDoc exception", {
+      error: String((payload as { error?: unknown })?.error ?? payload),
+    });
+  }
+
+  showEquationNote() {
+    if (this.noteTimer) clearTimeout(this.noteTimer);
+    this.update({ equationNote: true });
+    this.noteTimer = setTimeout(() => {
+      this.noteTimer = null;
+      this.update({ equationNote: false });
+    }, 6000);
+  }
+
+  setMode(mode: DocxMode) {
+    this.mode = mode;
+    this.sd?.setDocumentMode(this.readOnly ? "viewing" : mode);
+  }
+
+  /** Saves unsaved edits; true when nothing is left unsaved. */
+  save(): Promise<boolean> {
+    if (!this.saving) {
+      this.saving = this.saveNow().finally(() => {
+        this.saving = null;
+      });
+    }
+    return this.saving;
+  }
+
+  private async saveNow(): Promise<boolean> {
+    const sd = this.sd;
+    if (!this.isDirty()) return true;
+    if (!sd || !this.original) return false;
+    const changes = this.changes;
+    this.update({ saving: true, saveError: null });
+    try {
+      const edited = await exportDocx(sd);
+      // Loaded with the first save, like SuperDoc on the first open.
+      const { preserveUnchanged } = await import("./preserve");
+      const result = this.baseline
+        ? preserveUnchanged(this.original, this.baseline, edited)
+        : {
+            bytes: edited,
+            preserved: false,
+            reason: "no baseline",
+            changedParts: [],
+          };
+      if (!result.preserved) {
+        log.warn("Saved SuperDoc's whole export", { reason: result.reason });
+      }
+      const disk = await saveDocxBytes(this.absolutePath, result.bytes);
+      this.original = result.bytes;
+      this.baseline = edited;
+      this.knownModifiedMs = disk.modifiedMs;
+      this.savedChanges = changes;
+      this.update({
+        saving: false,
+        dirty: this.isDirty(),
+        changedOnDisk: false,
+        openInWord: disk.openInWord,
+      });
+      return !this.isDirty();
+    } catch (err) {
+      log.error("A Word file could not be saved", {
+        path: this.absolutePath,
+        error: String(err),
+      });
+      this.update({
+        saving: false,
+        saveError: `Not saved: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return false;
+    }
+  }
+
+  /** Looks at the file on disk again. */
+  async checkDisk(): Promise<void> {
+    if (this.closed || this.state.phase !== "ready" || this.saving) return;
+    let disk: DocxFileState;
+    try {
+      disk = await fileState(this.absolutePath);
+    } catch {
+      return;
+    }
+    if (this.closed) return;
+    if (disk.openInWord !== this.state.openInWord) {
+      this.update({ openInWord: disk.openInWord });
+    }
+    const decision = decideOnDiskChange(
+      this.knownModifiedMs,
+      disk,
+      this.isDirty(),
+    );
+    if (decision === "reload") await this.reload();
+    else if (decision === "ask" && !this.state.changedOnDisk) {
+      this.update({ changedOnDisk: true });
+    }
+  }
+
+  /** Drops this tab's edits and reads the file again. */
+  async reload(): Promise<void> {
+    this.discarded = false;
+    await this.open();
+  }
+
+  /** Keeps the tab's edits; the next save replaces the file on disk. */
+  async keepMine(): Promise<void> {
+    try {
+      this.knownModifiedMs = (await fileState(this.absolutePath)).modifiedMs;
+    } catch {
+      /* the next look asks again */
+    }
+    this.update({ changedOnDisk: false });
+  }
+
+  discard(): void {
+    this.discarded = true;
+    if (this.state.dirty) this.update({ dirty: false });
+  }
+
+  private destroyEditor() {
+    const sd = this.sd;
+    this.sd = null;
+    if (!sd) return;
+    try {
+      sd.destroy();
+    } catch (err) {
+      log.warn("SuperDoc did not close cleanly", { error: String(err) });
+    }
+    this.options.editor.replaceChildren();
+    document.getElementById(this.options.toolbarId)?.replaceChildren();
+  }
+
+  /**
+   * Saves unsaved edits (unless discarded) and closes the document. False
+   * when edits could not be saved and are lost.
+   */
+  async close(): Promise<boolean> {
+    if (this.closed) return true;
+    const saved = this.isDirty() ? await this.save() : true;
+    this.closed = true;
+    this.generation++;
+    if (this.noteTimer) clearTimeout(this.noteTimer);
+    this.destroyEditor();
+    return saved;
+  }
+}
