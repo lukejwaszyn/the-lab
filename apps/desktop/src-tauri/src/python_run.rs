@@ -52,14 +52,6 @@ fn file_interpreter(project_root: &Path, file: &str) -> Result<FileInterpreter, 
     })
 }
 
-fn interpreter_for(map: &PythonMap, file: &str) -> FileInterpreter {
-    let (folder, interpreter) = map.interpreter_for(file);
-    FileInterpreter {
-        folder: folder.map(str::to_string),
-        interpreter: interpreter.clone(),
-    }
-}
-
 /// Runs `file` (relative to the project root) for this window. The
 /// frontend picks `run_id` so that it knows the run's output before this
 /// returns. Refused, with the reason, while the window's script runs, for a
@@ -154,6 +146,15 @@ impl RunSink for WindowSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file's interpreter, taken from the whole map.
+    fn interpreter_for(map: &PythonMap, file: &str) -> FileInterpreter {
+        let (folder, interpreter) = map.interpreter_for(file);
+        FileInterpreter {
+            folder: folder.map(str::to_string),
+            interpreter: interpreter.clone(),
+        }
+    }
 
     #[test]
     fn a_file_gets_the_interpreter_of_its_folder_and_says_which() {
