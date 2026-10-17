@@ -328,6 +328,27 @@ describe("changes on disk", () => {
     expect(controller.state.changedOnDisk).toBe(false);
   });
 
+  it("does not take a look that overlapped its own save for a change", async () => {
+    const { controller } = makeController();
+    await controller.open();
+    last().transact();
+    const stale = { ...disk };
+    let answerLook: (state: DocxFileState) => void = () => {};
+    vi.mocked(invoke).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answerLook = resolve as (state: DocxFileState) => void;
+        }) as never,
+    );
+    // The look reads the file's time before the save lands, and answers after.
+    const looking = controller.checkDisk();
+    await controller.save();
+    answerLook(stale);
+    await looking;
+    expect(controller.state.changedOnDisk).toBe(false);
+    expect(sd.made).toHaveLength(1);
+  });
+
   it("says when Word has the file open", async () => {
     const { controller } = makeController();
     await controller.open();

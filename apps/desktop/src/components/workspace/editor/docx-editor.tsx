@@ -59,6 +59,15 @@ export function DocxEditor({ file }: { file: ProjectFile }) {
     let unregister: (() => void) | null = null;
     let cancelled = false;
     let controller: DocxController | null = null;
+    // The file tree's dot, while this file's project is still the one open
+    // (a closing tab may still be saving when the next project opens).
+    const projectRoot = useDocumentStore.getState().projectRoot;
+    const markDirty = (dirty: boolean) => {
+      const documents = useDocumentStore.getState();
+      if (documents.projectRoot === projectRoot) {
+        documents.markFileDirty(fileId, dirty);
+      }
+    };
     (async () => {
       await fillTrackChangesAuthorOnce();
       if (cancelled) return;
@@ -72,8 +81,8 @@ export function DocxEditor({ file }: { file: ProjectFile }) {
         onModeChange: (next) =>
           useDocxPrefsStore.getState().setMode(file.absolutePath, next),
         onChange: (next) => {
-          setState(next);
-          useDocumentStore.getState().markFileDirty(fileId, next.dirty);
+          if (!cancelled) setState(next);
+          markDirty(next.dirty);
           updateCloseGuard();
         },
       });
@@ -89,7 +98,7 @@ export function DocxEditor({ file }: { file: ProjectFile }) {
       // Showing another tab, or the project closing, saves unsaved edits.
       void closing.close().then((saved) => {
         unregister?.();
-        useDocumentStore.getState().markFileDirty(fileId, false);
+        markDirty(false);
         if (!saved) {
           toast.error(
             `${file.name} could not be saved, so its latest edits were lost. ${closing.state.saveError ?? ""}`,

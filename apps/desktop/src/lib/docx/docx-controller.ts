@@ -478,13 +478,15 @@ export class DocxController implements DocxSession {
   /** Looks at the file on disk again. */
   async checkDisk(): Promise<void> {
     if (this.closed || this.state.phase !== "ready" || this.saving) return;
+    const known = this.knownModifiedMs;
     let disk: DocxFileState;
     try {
       disk = await fileState(this.absolutePath);
     } catch {
       return;
     }
-    if (this.closed) return;
+    // A save (or reload) meanwhile makes this look stale.
+    if (this.closed || this.saving || this.knownModifiedMs !== known) return;
     if (disk.openInWord !== this.state.openInWord) {
       this.update({ openInWord: disk.openInWord });
     }
