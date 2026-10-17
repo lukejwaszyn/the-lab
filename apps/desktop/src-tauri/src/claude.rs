@@ -1945,23 +1945,109 @@ fn create_command(
         }
     }
 
-    // Auto-detect project venv and inject VIRTUAL_ENV + PATH
-    let venv_dir = std::path::Path::new(cwd).join(".venv");
-    if venv_dir.exists() {
-        cmd.env("VIRTUAL_ENV", &venv_dir);
-        cmd.env("UV_PROJECT_ENVIRONMENT", &venv_dir);
-        cmd.env("PYTHONNOUSERSITE", "1");
-        cmd.env("PIP_REQUIRE_VIRTUALENV", "true");
-        #[cfg(not(target_os = "windows"))]
-        let venv_bin = venv_dir.join("bin");
-        #[cfg(target_os = "windows")]
-        let venv_bin = venv_dir.join("Scripts");
-        current_path = format!("{}{}{}", venv_bin.to_string_lossy(), sep, current_path);
+    // The project's Python: the interpreter thelab.toml sets, else
+    // ClaudePrism's rule, the project's .venv.
+    let python = python_env(std::path::Path::new(clean_cwd.as_ref()));
+    for key in &python.remove {
+        cmd.env_remove(key);
+    }
+    for (key, value) in &python.set {
+        cmd.env(key, value);
+    }
+    if let Some(first) = &python.path_first {
+        current_path = format!("{}{}{}", first.to_string_lossy(), sep, current_path);
     }
 
     cmd.env("PATH", current_path);
 
     cmd
+}
+
+/// What Claude's process gets for Python, in a project at `cwd`.
+#[derive(Debug, Default, PartialEq)]
+struct PythonEnv {
+    set: Vec<(&'static str, std::ffi::OsString)>,
+    remove: Vec<&'static str>,
+    /// Put first on PATH.
+    path_first: Option<PathBuf>,
+}
+
+/// ClaudePrism activated a project's `.venv` whenever there was one, so a
+/// stray `.venv` won over the interpreters thelab.toml sets. When
+/// thelab.toml has a `[python]` section, its interpreter for the project
+/// (`[python] interpreter`, else the one detected) decides: its virtual
+/// environment is activated, or, outside one, its folder goes first on
+/// PATH. Without `[python]`, the `.venv` rule stays. A thelab.toml that
+/// cannot be read falls back to that rule too, so Claude still starts.
+fn python_env(cwd: &Path) -> PythonEnv {
+    let project_venv = || {
+        let venv = cwd.join(".venv");
+        if venv.exists() {
+            activate_venv(&venv, true)
+        } else {
+            PythonEnv::default()
+        }
+    };
+    let interpreter = match thelab_core::python::project_interpreter(cwd) {
+        Ok(Some(interpreter)) => interpreter,
+        Ok(None) => return project_venv(),
+        Err(e) => {
+            eprintln!(
+                "[python] Claude's Python environment uses the project's .venv rule: {}",
+                e
+            );
+            return project_venv();
+        }
+    };
+    if let Some(venv) = &interpreter.virtual_env {
+        let venv = PathBuf::from(venv);
+        // uv syncs the environment it is pointed at with this project's
+        // lock file, which suits only an environment of the project's own.
+        let own = cwd.canonicalize().is_ok_and(|root| venv.starts_with(root));
+        return activate_venv(&venv, own);
+    }
+    match interpreter
+        .path
+        .as_deref()
+        .map(Path::new)
+        .and_then(Path::parent)
+    {
+        Some(folder) => PythonEnv {
+            remove: vec!["VIRTUAL_ENV"],
+            path_first: Some(folder.to_path_buf()),
+            ..PythonEnv::default()
+        },
+        None => {
+            eprintln!(
+                "[python] Claude's environment sets no Python: {}",
+                interpreter
+                    .problem
+                    .as_deref()
+                    .unwrap_or("no interpreter found")
+            );
+            PythonEnv::default()
+        }
+    }
+}
+
+/// The variables ClaudePrism set for a project's `.venv`, for `venv`.
+/// `UV_PROJECT_ENVIRONMENT` only for an environment of the project's own.
+fn activate_venv(venv: &Path, project_own: bool) -> PythonEnv {
+    let mut set = vec![("VIRTUAL_ENV", venv.as_os_str().to_os_string())];
+    if project_own {
+        set.push(("UV_PROJECT_ENVIRONMENT", venv.as_os_str().to_os_string()));
+    }
+    set.push(("PYTHONNOUSERSITE", "1".into()));
+    set.push(("PIP_REQUIRE_VIRTUALENV", "true".into()));
+    #[cfg(not(target_os = "windows"))]
+    let bin = venv.join("bin");
+    #[cfg(target_os = "windows")]
+    let bin = venv.join("Scripts");
+    PythonEnv {
+        set,
+        remove: Vec::new(),
+        path_first: Some(bin),
+    }
 }
 
 fn clear_anthropic_provider_env(cmd: &mut Command) {
@@ -5128,6 +5214,171 @@ mod tests {
         let cmd = create_command("/usr/bin/claude", vec![], "/tmp", Some("high"));
         let debug_str = format!("{:?}", cmd);
         assert!(debug_str.contains("claude"));
+    }
+
+    // --- Claude's Python environment ---
+
+    /// Stand-in interpreters are shell scripts, so these run on Unix.
+    #[cfg(unix)]
+    mod python_environment {
+        use super::*;
+
+        /// A scratch project, resolved (on macOS the temporary folder is a
+        /// symlink), with a stray `.venv` in it.
+        fn python_project() -> (tempfile::TempDir, PathBuf) {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            std::fs::create_dir_all(root.join(".venv/bin")).unwrap();
+            std::fs::write(root.join(".venv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+            (dir, root)
+        }
+
+        /// An executable stand-in for Python at `path`, in a virtual
+        /// environment when `venv` is set.
+        fn stand_in_python(path: &Path, venv: bool) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "#!/bin/sh\necho 'Python 3.12.4'\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if venv {
+                let cfg = path.parent().unwrap().parent().unwrap().join("pyvenv.cfg");
+                std::fs::write(cfg, "home = /usr/bin\n").unwrap();
+            }
+        }
+
+        /// The variables `create_command` sets (`Some`) or removes (`None`).
+        fn command_env(cmd: &Command) -> HashMap<String, Option<String>> {
+            cmd.as_std()
+                .get_envs()
+                .map(|(key, value)| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.map(|v| v.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect()
+        }
+
+        #[test]
+        fn test_create_command_activates_the_venv_thelab_toml_names_not_a_stray_one() {
+            let (_dir, root) = python_project();
+            stand_in_python(&root.join("envs/sim/bin/python"), true);
+            std::fs::write(
+                root.join("thelab.toml"),
+                "[python]\ninterpreter = \"envs/sim/bin/python\"\n",
+            )
+            .unwrap();
+
+            let cmd = create_command("/usr/bin/claude", vec![], root.to_str().unwrap(), None);
+            let env = command_env(&cmd);
+            let venv = root.join("envs/sim").display().to_string();
+            assert_eq!(env["VIRTUAL_ENV"].as_deref(), Some(venv.as_str()));
+            let path = env["PATH"].clone().unwrap();
+            assert!(
+                path.starts_with(&format!("{venv}/bin:")),
+                "PATH starts with the venv's bin: {path}"
+            );
+            assert!(!path.contains("/.venv/"), "{path}");
+        }
+
+        fn activated(venv: &Path, project_own: bool) -> PythonEnv {
+            let mut set = vec![("VIRTUAL_ENV", venv.as_os_str().to_os_string())];
+            if project_own {
+                set.push(("UV_PROJECT_ENVIRONMENT", venv.as_os_str().to_os_string()));
+            }
+            set.push(("PYTHONNOUSERSITE", "1".into()));
+            set.push(("PIP_REQUIRE_VIRTUALENV", "true".into()));
+            PythonEnv {
+                set,
+                remove: Vec::new(),
+                path_first: Some(venv.join("bin")),
+            }
+        }
+
+        #[test]
+        fn test_python_env_without_python_in_thelab_toml_keeps_the_venv_rule() {
+            let (_dir, root) = python_project();
+            assert_eq!(python_env(&root), activated(&root.join(".venv"), true));
+            std::fs::write(root.join("thelab.toml"), "main = \"main.tex\"\n").unwrap();
+            assert_eq!(python_env(&root), activated(&root.join(".venv"), true));
+
+            std::fs::remove_dir_all(root.join(".venv")).unwrap();
+            assert_eq!(python_env(&root), PythonEnv::default());
+        }
+
+        #[test]
+        fn test_python_env_puts_an_interpreter_outside_a_venv_first_on_path() {
+            let (_dir, root) = python_project();
+            let tools = tempfile::tempdir().unwrap();
+            let python = tools.path().canonicalize().unwrap().join("bin/python3");
+            stand_in_python(&python, false);
+            std::fs::write(
+                root.join("thelab.toml"),
+                format!("[python]\ninterpreter = \"{}\"\n", python.display()),
+            )
+            .unwrap();
+
+            assert_eq!(
+                python_env(&root),
+                PythonEnv {
+                    set: Vec::new(),
+                    remove: vec!["VIRTUAL_ENV"],
+                    path_first: Some(python.parent().unwrap().to_path_buf()),
+                }
+            );
+        }
+
+        #[test]
+        fn test_python_env_activates_a_venv_outside_the_project_without_uv() {
+            // A shared environment such as ~/opt/openEMS/venv: uv must not sync
+            // it with this project's lock file.
+            let (_dir, root) = python_project();
+            let shared = tempfile::tempdir().unwrap();
+            let venv = shared.path().canonicalize().unwrap().join("openEMS/venv");
+            stand_in_python(&venv.join("bin/python"), true);
+            std::fs::write(
+                root.join("thelab.toml"),
+                format!(
+                    "[python]\ninterpreter = \"{}\"\n",
+                    venv.join("bin/python").display()
+                ),
+            )
+            .unwrap();
+
+            assert_eq!(python_env(&root), activated(&venv, false));
+        }
+
+        #[test]
+        fn test_python_env_with_only_folders_set_uses_the_detected_default() {
+            let (_dir, root) = python_project();
+            stand_in_python(&root.join("envs/sim/bin/python"), true);
+            stand_in_python(&root.join(".venv/bin/python"), true);
+            std::fs::write(
+                root.join("thelab.toml"),
+                "[python.folders]\n\"sim\" = \"envs/sim/bin/python\"\n",
+            )
+            .unwrap();
+            assert_eq!(python_env(&root), activated(&root.join(".venv"), true));
+        }
+
+        #[test]
+        fn test_python_env_sets_nothing_for_a_missing_interpreter() {
+            let (_dir, root) = python_project();
+            std::fs::write(
+                root.join("thelab.toml"),
+                "[python]\ninterpreter = \"envs/gone/bin/python\"\n",
+            )
+            .unwrap();
+            assert_eq!(python_env(&root), PythonEnv::default());
+        }
+
+        #[test]
+        fn test_python_env_with_a_broken_thelab_toml_keeps_the_venv_rule() {
+            let (_dir, root) = python_project();
+            std::fs::write(root.join("thelab.toml"), "[python]\ninterpreters = \"x\"\n").unwrap();
+            assert_eq!(python_env(&root), activated(&root.join(".venv"), true));
+            std::fs::write(root.join("thelab.toml"), "[python\n").unwrap();
+            assert_eq!(python_env(&root), activated(&root.join(".venv"), true));
+        }
     }
 
     // --- clean_user_message_title edge cases ---
