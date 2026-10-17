@@ -447,6 +447,13 @@ fn persistent_build_dir(project_dir: &str) -> PathBuf {
     PathBuf::from(project_dir).join(".prism").join("build")
 }
 
+/// Where a compile leaves the project's PDF, log and SyncTeX data: the
+/// `build/` thelab writes inside the copy. The project picker looks there
+/// too, through `src/lib/compiled-pdf-dir.json`.
+pub(crate) fn compiled_pdf_dir(project_dir: &Path) -> PathBuf {
+    persistent_build_dir(&project_dir.to_string_lossy()).join(BUILD_DIRECTORY)
+}
+
 /// What ClaudePrism put before `\begin{document}` to compile a document
 /// with nothing in its body: a blank page instead of an error.
 const BLANK_PAGE: &str = "\\AtEndDocument{\\null}";
@@ -1556,8 +1563,9 @@ As \\textcite{knuth1984} shows.
             .pdf
             .as_ref()
             .is_some_and(|pdf| pdf.starts_with(b"%PDF")));
-        // The engine ran on the copy, which the project does not see.
-        assert!(project.path().join(".prism/build/build/main.pdf").is_file());
+        // The engine ran on the copy, which the project does not see, and
+        // left the PDF where the project picker looks for it.
+        assert!(compiled_pdf_dir(project.path()).join("main.pdf").is_file());
         assert!(!project.path().join("build").exists());
 
         // An entry left open: biber's own message, at its file and line.
@@ -1669,6 +1677,32 @@ As \\textcite{knuth1984} shows.
 
         std::fs::write(&main, "\\documentclass{article}\n\\input{body}\n").unwrap();
         assert!(!add_blank_page(&main));
+    }
+
+    // --- where the PDF is ---
+
+    #[test]
+    fn test_the_frontend_looks_for_the_pdf_where_compiles_leave_it() {
+        // The project picker's first place to look (src/lib/compiled-pdf.ts).
+        let segments: Vec<String> =
+            serde_json::from_str(include_str!("../../src/lib/compiled-pdf-dir.json")).unwrap();
+        let project = Path::new("/p");
+        let frontend = segments
+            .iter()
+            .fold(project.to_path_buf(), |path, segment| path.join(segment));
+        assert_eq!(frontend, compiled_pdf_dir(project));
+
+        // compiled_pdf_dir is where thelab puts the PDF when it compiles
+        // the copy (an actual compile checks it in the biber test).
+        let project = tempfile::tempdir().unwrap();
+        let work = persistent_build_dir(&project.path().to_string_lossy());
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("main.tex"), "\\documentclass{article}").unwrap();
+        let copy = thelab_core::scan::scan(&work, Some("main.tex")).unwrap();
+        assert_eq!(
+            thelab_core::compile::pdf_path(&copy).unwrap(),
+            compiled_pdf_dir(&project.path().canonicalize().unwrap()).join("main.pdf")
+        );
     }
 
     /// Compiles the project folder named by `THELAB_COMPILE_PROJECT` through

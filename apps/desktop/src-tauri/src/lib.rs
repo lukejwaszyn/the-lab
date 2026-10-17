@@ -374,14 +374,15 @@ fn has_tex_file(dir: &Path) -> bool {
 
 fn project_modified_ms(dir: &Path) -> u64 {
     let mut latest = modified_ms(dir);
-    for relative in [
-        "main.tex",
-        "document.tex",
-        ".prism/build/build/main.pdf",
-        ".prism/build/main.pdf",
-        ".claudeprism/history.git/.git/refs/heads/master",
+    for path in [
+        dir.join("main.tex"),
+        dir.join("document.tex"),
+        latex::compiled_pdf_dir(dir).join("main.pdf"),
+        // Where ClaudePrism's embedded Tectonic left it.
+        dir.join(".prism/build/main.pdf"),
+        dir.join(".claudeprism/history.git/.git/refs/heads/master"),
     ] {
-        latest = latest.max(modified_ms(&dir.join(relative)));
+        latest = latest.max(modified_ms(&path));
     }
 
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -729,4 +730,40 @@ pub fn run() {
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn test_a_project_counts_as_modified_when_its_pdf_was_compiled() {
+        let project = tempfile::tempdir().unwrap();
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let main = project.path().join("main.tex");
+        std::fs::write(&main, "doc").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&main)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let pdf_dir = latex::compiled_pdf_dir(project.path());
+        std::fs::create_dir_all(&pdf_dir).unwrap();
+        let pdf = pdf_dir.join("main.pdf");
+        std::fs::write(&pdf, "%PDF").unwrap();
+        let compiled = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&pdf)
+            .unwrap()
+            .set_modified(compiled)
+            .unwrap();
+        let project_dir = std::fs::File::open(project.path()).unwrap();
+        project_dir.set_modified(old).unwrap();
+
+        assert_eq!(project_modified_ms(project.path()), 2_000_000_000);
+    }
 }

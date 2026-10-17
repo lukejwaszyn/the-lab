@@ -40,6 +40,7 @@ import { useClaudeSetupStore } from "@/stores/claude-setup-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { compileLatex } from "@/lib/latex-compiler";
+import { PROJECT_PDF_CANDIDATES } from "@/lib/compiled-pdf";
 import { getMupdfClient } from "@/lib/mupdf/mupdf-client";
 import { exists, join } from "@/lib/tauri/fs";
 import { Button } from "@/components/ui/button";
@@ -678,14 +679,7 @@ async function loadProjectPreview(
   const promise = (async () => {
     const createdAt = await getProjectCreatedAt(project.path);
     const pdfPath = await firstExistingPath(project.path, [
-      // thelab_core writes into build/ inside the .prism/build copy.
-      [".prism", "build", "build", "main.pdf"],
-      [".prism", "build", "build", "document.pdf"],
-      // Where ClaudePrism's embedded Tectonic left it.
-      [".prism", "build", "main.pdf"],
-      [".prism", "build", "document.pdf"],
-      ["main.pdf"],
-      ["document.pdf"],
+      ...PROJECT_PDF_CANDIDATES,
     ]);
 
     if (pdfPath) {
