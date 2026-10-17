@@ -1,0 +1,2 @@
+warning: Object @page.1 already defined.
+warning: Object @page.1 already defined.

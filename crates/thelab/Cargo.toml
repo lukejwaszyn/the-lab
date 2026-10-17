@@ -1,0 +1,12 @@
+[package]
+name = "thelab"
+description = "CLI and MCP server for The Lab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thelab-core = { path = "../thelab-core" }
+serde.workspace = true
+serde_json.workspace = true

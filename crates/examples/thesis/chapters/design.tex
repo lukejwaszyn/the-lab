@@ -1,0 +1,38 @@
+\chapter{Design}
+\label{chap:design}
+
+The prototype keeps the engine alive between runs and saves its state at
+regular points in the document.
+
+\section{Snapshots}
+\label{sec:snapshots}
+
+A snapshot records the engine state at a page boundary. When a source file
+changes, the system finds the last snapshot taken before the first changed
+byte and resumes from there. Everything before that point is reused.
+
+\subsection{Choosing Snapshot Points}
+\label{sec:snapshot-points}
+
+Snapshots cost memory, so the system does not take one at every page. With a
+snapshot every $k$ pages, the expected number of pages to retypeset after an
+edit on a uniformly random page is
+\begin{equation}
+  E[\text{pages}] = \frac{k - 1}{2} + 1 .
+  \label{eq:expected-pages}
+\end{equation}
+
+\section{Invalidation}
+\label{sec:invalidation}
+
+A change to an auxiliary file invalidates every snapshot, because any page
+may read it (Section~\ref{sec:aux}). The prototype therefore compares the new
+auxiliary file with the old one and restarts from the beginning only when
+they differ.
+
+\section{Limitations}
+\label{sec:limitations}
+
+The design assumes that a run is deterministic given its inputs. Documents
+that read the clock or call external programs break that assumption, and the
+prototype falls back to a full run for them.

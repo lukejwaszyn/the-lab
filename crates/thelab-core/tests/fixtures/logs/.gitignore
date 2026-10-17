@@ -1,0 +1,3 @@
+# The repository's .gitignore drops TeX logs; these are test fixtures.
+!*.log
+!*.blg

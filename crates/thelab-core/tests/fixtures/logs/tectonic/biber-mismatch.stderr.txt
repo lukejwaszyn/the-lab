@@ -1,0 +1,16 @@
+error: the external tool exited with an error code; its stdout was:
+
+===============================================================================
+INFO - This is Biber 2.22
+INFO - Logfile is 'main.blg'
+INFO - Reading 'main.bcf'
+ERROR - Error: Found biblatex control file version 3.8, expected version 3.11.
+This means that your biber (2.22) and biblatex (3.17) versions are incompatible.
+See compat matrix in biblatex or biber PDF documentation.
+INFO - ERRORS: 1
+===============================================================================
+error: its stderr was:
+
+===============================================================================
+===============================================================================
+error: the external tool exited with error code 2

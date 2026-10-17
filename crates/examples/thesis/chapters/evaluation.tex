@@ -1,0 +1,40 @@
+\chapter{Evaluation}
+\label{chap:evaluation}
+
+This chapter reports rebuild latency for three documents. The numbers are
+illustrative placeholders for the sample project.
+
+\section{Setup}
+\label{sec:setup}
+
+Each document was edited at a random position and rebuilt, once with a full
+run and once with the prototype described in Chapter~\ref{chap:design}.
+
+\section{Results}
+\label{sec:results}
+
+Table~\ref{tab:latency} lists the median latency over 50 edits. The
+incremental rebuild is faster in every case, and the gap widens as the
+document grows, which matches Equation~\ref{eq:expected-pages}.
+
+\begin{table}[ht]
+  \centering
+  \caption{Median rebuild latency in milliseconds (illustrative).}
+  \label{tab:latency}
+  \begin{tabular}{lrrr}
+    \toprule
+    Document & Pages & Full run & Incremental \\
+    \midrule
+    Article  &    12 &      410 &          95 \\
+    Thesis   &    96 &     2350 &         140 \\
+    Book     &   480 &    11800 &         210 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Discussion}
+\label{sec:discussion}
+
+Latency for the incremental rebuild depends mostly on the distance to the
+nearest snapshot (Section~\ref{sec:snapshot-points}), not on the length of
+the document.

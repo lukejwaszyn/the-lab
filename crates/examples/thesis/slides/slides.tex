@@ -1,0 +1,46 @@
+\documentclass[aspectratio=169]{beamer}
+
+\title{Incremental Compilation for Structured Documents}
+\author{A. Student}
+\date{Thesis defense, May 2027}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{The Problem}
+  \label{frame:problem}
+  \begin{itemize}
+    \item \TeX{} is a batch program: every run starts from the first byte.
+    \item Authors edit one sentence at a time.
+    \item Rebuild latency grows with document length, not edit size.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{The Idea}
+  \label{frame:idea}
+  \begin{enumerate}
+    \item Keep the engine alive between runs.
+    \item Save a snapshot of its state every $k$ pages.
+    \item After an edit, resume from the last snapshot before the change.
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Results}
+  \label{frame:results}
+  \centering
+  \begin{tabular}{lrr}
+    Document & Full run & Incremental \\
+    \hline
+    Article  &  410 ms &  95 ms \\
+    Thesis   & 2350 ms & 140 ms \\
+    Book     & 11800 ms & 210 ms \\
+  \end{tabular}
+
+  \medskip
+  Illustrative numbers for the sample project.
+\end{frame}
+
+\end{document}

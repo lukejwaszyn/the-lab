@@ -1,0 +1,40 @@
+\documentclass[12pt]{report}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage[numbers]{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\title{Incremental Compilation for Structured Documents}
+\author{A. Student}
+\date{May 2027}
+
+\begin{document}
+
+% The title page and the abstract both reset the page counter to 1, so
+% hyperref would create the anchor "page.1" three times. Switch page anchors
+% off until the front matter is done.
+\hypersetup{pageanchor=false}
+\maketitle
+
+\begin{abstract}
+This sample thesis ships with Change as a test and demo project. It studies
+how a typesetting system can avoid redoing work when only a small part of a
+document changes. The text is placeholder prose and the numbers in the
+evaluation are illustrative.
+\end{abstract}
+\hypersetup{pageanchor=true}
+
+\tableofcontents
+
+\include{chapters/introduction}
+\include{chapters/background}
+\include{chapters/design}
+\include{chapters/evaluation}
+\include{chapters/conclusion}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

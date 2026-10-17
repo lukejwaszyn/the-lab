@@ -1,0 +1,5 @@
+warning: errors were issued by BibTeX, but were ignored; use --print and/or --keep-logs for details.
+warning: errors were issued by BibTeX, but were ignored; use --print and/or --keep-logs for details.
+warning: errors were issued by BibTeX, but were ignored; use --print and/or --keep-logs for details.
+warning: errors were issued by BibTeX, but were ignored; use --print and/or --keep-logs for details.
+warning: errors were issued by BibTeX, but were ignored; use --print and/or --keep-logs for details.

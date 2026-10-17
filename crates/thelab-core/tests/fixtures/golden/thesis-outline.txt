@@ -1,0 +1,69 @@
+main: main.tex
+files: main.tex chapters/introduction.tex chapters/background.tex figures/pipeline.tex chapters/design.tex chapters/evaluation.tex chapters/conclusion.tex
+bibliography: refs.bib
+words before first heading: 44
+total words: 741
+
+headings:
+  chapter "Introduction" chapters/introduction.tex:1 (75 words)
+    section "Motivation" chapters/introduction.tex:13 (43 words)
+    section "Contributions" chapters/introduction.tex:21 (36 words)
+    section "Outline" chapters/introduction.tex:33 (16 words)
+  chapter "Background" chapters/background.tex:1 (14 words)
+    section "The TeX Pipeline" chapters/background.tex:7 (63 words)
+      subsection "Auxiliary Files" chapters/background.tex:24 (42 words)
+    section "Documents as Programs" chapters/background.tex:32 (46 words)
+    section "Measuring Information in an Edit" chapters/background.tex:40 (43 words)
+  chapter "Design" chapters/design.tex:1 (18 words)
+    section "Snapshots" chapters/design.tex:7 (37 words)
+      subsection "Choosing Snapshot Points" chapters/design.tex:14 (34 words)
+    section "Invalidation" chapters/design.tex:25 (37 words)
+    section "Limitations" chapters/design.tex:33 (34 words)
+  chapter "Evaluation" chapters/evaluation.tex:1 (17 words)
+    section "Setup" chapters/evaluation.tex:7 (23 words)
+    section "Results" chapters/evaluation.tex:13 (42 words)
+    section "Discussion" chapters/evaluation.tex:35 (22 words)
+  chapter "Conclusion" chapters/conclusion.tex:1 (35 words)
+    section "Future Work" chapters/conclusion.tex:9 (20 words)
+
+units:
+  chapter "Introduction" 170 words
+  chapter "Background" 208 words
+  chapter "Design" 160 words
+  chapter "Evaluation" 104 words
+  chapter "Conclusion" 55 words
+
+labels:
+  chap:introduction chapters/introduction.tex:2
+  sec:motivation chapters/introduction.tex:14
+  sec:contributions chapters/introduction.tex:22
+  sec:outline chapters/introduction.tex:34
+  chap:background chapters/background.tex:2
+  sec:pipeline chapters/background.tex:8
+  fig:pipeline chapters/background.tex:21
+  sec:aux chapters/background.tex:25
+  sec:programs chapters/background.tex:33
+  sec:information chapters/background.tex:41
+  eq:information chapters/background.tex:48
+  chap:design chapters/design.tex:2
+  sec:snapshots chapters/design.tex:8
+  sec:snapshot-points chapters/design.tex:15
+  eq:expected-pages chapters/design.tex:22
+  sec:invalidation chapters/design.tex:26
+  sec:limitations chapters/design.tex:34
+  chap:evaluation chapters/evaluation.tex:2
+  sec:setup chapters/evaluation.tex:8
+  sec:results chapters/evaluation.tex:14
+  tab:latency chapters/evaluation.tex:23
+  sec:discussion chapters/evaluation.tex:36
+  chap:conclusion chapters/conclusion.tex:2
+  sec:future-work chapters/conclusion.tex:10
+
+citations:
+  knuth1984texbook chapters/introduction.tex:9
+  lamport1994latex chapters/introduction.tex:10
+  feldman1979make chapters/introduction.tex:17
+  knuth1981breaking chapters/background.tex:13
+  mittelbach2004companion chapters/background.tex:30
+  knuth1984literate chapters/background.tex:37
+  shannon1948mathematical chapters/background.tex:50

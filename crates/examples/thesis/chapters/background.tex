@@ -1,0 +1,51 @@
+\chapter{Background}
+\label{chap:background}
+
+This chapter summarizes the parts of the typesetting pipeline that matter for
+incremental rebuilds.
+
+\section{The \TeX{} Pipeline}
+\label{sec:pipeline}
+
+\TeX{} turns a stream of characters into tokens, expands macros, and builds
+lists of boxes and glue. Paragraphs are broken into lines by an algorithm
+that minimizes a global cost over the whole paragraph
+\citep{knuth1981breaking}. Figure~\ref{fig:pipeline} shows the stages.
+
+\begin{figure}[ht]
+  \centering
+  \input{figures/pipeline}
+  \caption{The stages of a typesetting run. An incremental system tries to
+           resume from a saved state inside the engine instead of restarting
+           at the source.}
+  \label{fig:pipeline}
+\end{figure}
+
+\subsection{Auxiliary Files}
+\label{sec:aux}
+
+Cross-references and citations are resolved through auxiliary files that one
+run writes and the next run reads. This is why a fresh document needs more
+than one pass, and it is the main source of dependencies that point backwards
+in the document \citep{mittelbach2004companion}.
+
+\section{Documents as Programs}
+\label{sec:programs}
+
+A \LaTeX{} source file is a program whose output is a document. The idea of
+treating a document and its code as a single text is older than \LaTeX{}
+itself \citep{knuth1984literate}. It also means that, in general, the effect
+of an edit cannot be predicted without running the program.
+
+\section{Measuring Information in an Edit}
+\label{sec:information}
+
+A small edit carries little information relative to the full source. If an
+edit selects one of $N$ equally likely alternatives, its information content
+is
+\begin{equation}
+  I = \log_2 N
+  \label{eq:information}
+\end{equation}
+bits \citep{shannon1948mathematical}. Equation~\ref{eq:information} gives a
+lower bound on the work a rebuild must do; a batch run does far more.

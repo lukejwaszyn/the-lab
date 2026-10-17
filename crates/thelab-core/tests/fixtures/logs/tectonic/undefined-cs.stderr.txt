@@ -1,0 +1,21 @@
+error: chapters/one:5: Undefined control sequence
+error: something bad happened inside XeTeX; its output follows:
+
+===============================================================================
+(main.tex
+LaTeX2e <2021-11-15> patch level 1
+L3 programming layer <2022-02-24> (report.cls
+Document Class: report 2021/10/04 v1.4n Standard LaTeX document class
+(size10.clo)) (l3backend-xetex.def)
+No file main.aux.
+(ts1cmr.fd)
+Chapter 1.
+(chapters/one
+! Undefined control sequence.
+l.5 This line calls \undefinedmacro
+                                    in the middle of a sentence.
+No pages of output.
+Transcript written on main.log.
+===============================================================================
+error: the XeTeX engine had an unrecoverable error
+caused by: halted on potentially-recoverable error as specified

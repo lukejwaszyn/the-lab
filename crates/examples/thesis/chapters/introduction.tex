@@ -1,0 +1,38 @@
+\chapter{Introduction}
+\label{chap:introduction}
+
+Writing a long document is an iterative activity. An author changes a
+sentence, rebuilds the document, and looks at the result. The time between
+the edit and the updated page shapes how the work feels: a short delay keeps
+attention on the prose, and a long one invites distraction.
+
+\TeX{} was designed as a batch program \citep{knuth1984texbook}, and
+\LaTeX{} inherits that model \citep{lamport1994latex}. Each run reads the
+whole source from the start, even when a single word has changed.
+
+\section{Motivation}
+\label{sec:motivation}
+
+Build tools for software solved a similar problem decades ago. \emph{Make}
+rebuilds only the targets whose inputs changed \citep{feldman1979make}. This
+thesis asks how far the same idea carries over to typesetting, where the
+output of one page can depend on every page before it.
+
+\section{Contributions}
+\label{sec:contributions}
+
+The thesis makes three contributions:
+\begin{itemize}
+  \item a model of the dependencies between source files and typeset pages,
+        described in Chapter~\ref{chap:design};
+  \item a prototype that reuses engine state across runs; and
+  \item an evaluation of rebuild latency, reported in
+        Chapter~\ref{chap:evaluation}.
+\end{itemize}
+
+\section{Outline}
+\label{sec:outline}
+
+Chapter~\ref{chap:background} reviews how \TeX{} processes a document.
+Chapter~\ref{chap:design} presents the design, Chapter~\ref{chap:evaluation}
+evaluates it, and Chapter~\ref{chap:conclusion} concludes.
