@@ -301,10 +301,10 @@ mod tests {
     #[test]
     fn a_file_is_open_in_word_when_any_owner_file_is_beside_it() {
         let dir = tempfile::tempdir().unwrap();
-        let doc = dir.path().join("Thesis draft.docx");
+        let doc = dir.path().join("Chapter draft.docx");
         fs::write(&doc, b"PK").unwrap();
         assert!(!file_state(&doc).open_in_word);
-        fs::write(dir.path().join("~$esis draft.docx"), b"owner").unwrap();
+        fs::write(dir.path().join("~$apter draft.docx"), b"owner").unwrap();
         let state = file_state(&doc);
         assert!(state.open_in_word);
         assert!(state.exists);
@@ -397,8 +397,8 @@ mod tests {
     #[test]
     fn paths_are_decoded_as_encode_uri_component_wrote_them() {
         assert_eq!(
-            percent_decode("%2FUsers%2Fa%20b%2FTh%C3%A8se%20(1).docx").unwrap(),
-            "/Users/a b/Thèse (1).docx"
+            percent_decode("%2Ftmp%2Fa%20b%2FR%C3%A9sum%C3%A9%20(1).docx").unwrap(),
+            "/tmp/a b/Résumé (1).docx"
         );
         assert!(percent_decode("%zz").is_err());
         assert!(percent_decode("%2").is_err());

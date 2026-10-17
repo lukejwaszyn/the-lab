@@ -40,7 +40,7 @@ describe("tauri fs helpers", () => {
 
     it("gives Word files their own types", () => {
       expect(getProjectFileType("paper.docx")).toBe("docx");
-      expect(getProjectFileType("Thesis Draft.DOCX")).toBe("docx");
+      expect(getProjectFileType("Chapter Draft.DOCX")).toBe("docx");
       // Word's old binary format shows a note, never its bytes as text.
       expect(getProjectFileType("old report.doc")).toBe("doc");
       expect(getProjectFileType("OLD.DOC")).toBe("doc");
