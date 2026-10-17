@@ -172,7 +172,10 @@ export function UvSetupDialog({ open, onClose }: UvSetupDialogProps) {
           {status === "ready" && venvReady && (
             <p className="max-w-full break-words text-muted-foreground text-xs leading-relaxed">
               Claude Code and The Lab's terminal tools use this environment when
-              running Python code. OpenAI-compatible providers use it through
+              running Python code, unless{" "}
+              <code className="text-foreground">[python]</code> in{" "}
+              <code className="text-foreground">thelab.toml</code> sets the
+              project's interpreter. OpenAI-compatible providers use it through
               PowerShell/Bash tool calls. Use{" "}
               <code className="text-foreground">uv pip install</code> to add
               packages.

@@ -12,7 +12,7 @@ A writing workspace in The Lab. The author writes this document; you review it, 
 ## Environment
 
 - **LaTeX Engine**: chosen per document by The Lab: TeX Live's \`latexmk\` for biblatex with biber and for LuaLaTeX, Tectonic (which fetches packages and fonts itself) otherwise. The engine menu above the PDF can fix one.
-- **Python**: Available via \`uv\` with project-local \`.venv/\`. Use \`uv pip install <pkg>\` to add packages, \`uv run <script>\` to execute.
+- **Python**: The interpreter is set per folder in \`thelab.toml\`: \`[python] interpreter\` for the project, \`[python.folders]\` for a folder and what is in it. \`thelab python\` lists which interpreter runs each folder. Run a script with its folder's interpreter (The Lab's Run, ⌘R, does). A \`.venv\` is made only when the author asks for one in the Python Environment dialog.
 - **Build Directory**: \`.prism/build/\` (persistent, do not modify directly)
 - **Version History**: \`.claudeprism/\` (automatic snapshots, do not modify)
 
@@ -23,7 +23,7 @@ A writing workspace in The Lab. The author writes this document; you review it, 
 ├── main.tex              # Primary document (or custom-named .tex)
 ├── references.bib        # Bibliography (if applicable)
 ├── attachments/           # Reference files (PDFs, images, data)
-├── .venv/                 # Python virtual environment (auto-detected)
+├── thelab.toml            # Which Python runs which folder (optional)
 └── figures/               # Generated figures and plots
 \`\`\`
 
@@ -31,8 +31,9 @@ A writing workspace in The Lab. The author writes this document; you review it, 
 
 \`\`\`bash
 # Python (data analysis, plotting, computation)
-uv pip install numpy matplotlib pandas scipy     # Install packages
-uv run python script.py                          # Run a script
+thelab python                         # Which interpreter runs each folder
+<interpreter> script.py               # Run a script with its folder's interpreter
+<interpreter> -m pip install numpy    # Add a package (ask the author first)
 
 # LaTeX is compiled automatically by The Lab — no manual build commands needed.
 \`\`\`
@@ -65,7 +66,7 @@ When the author asks you to make a figure with Python:
 ## Gotchas
 
 - For Unicode-heavy documents, add \`% !TEX program = xelatex\` or \`lualatex\` at the top of \`main.tex\` (LuaLaTeX always compiles with TeX Live).
-- Do NOT create or modify files in \`.prism/\`, \`.claudeprism/\`, or \`.venv/\` — these are managed automatically.
+- Do NOT create or modify files in \`.prism/\` (The Lab's build copy) or \`.claudeprism/\` (its history). Do not create a \`.venv\` or run \`uv sync\`: the interpreters are the ones \`thelab.toml\` sets.
 - When reviewing or editing LaTeX, check for matching \`\\begin{}\` / \`\\end{}\` pairs — mismatches cause hard-to-debug compile errors.
 - Large tables and figures should use \`\\begin{table}[htbp]\` / \`\\begin{figure}[htbp]\` for proper float placement.
 - If the author provides reference files in \`attachments/\`, read them before answering — they contain key context.
