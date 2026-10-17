@@ -105,6 +105,71 @@ const LOADERS: Record<CodeLanguage, () => Promise<Extension>> = {
   rust: () => import("@codemirror/lang-rust").then((m) => m.rust()),
 };
 
+/** The indent unit a new file of each language starts with: 4 spaces where
+ * the usual style says so (PEP 8, rustfmt, MATLAB's editor, most C), and
+ * CodeMirror's default of 2 for the rest. */
+const USUAL_INDENT: Record<CodeLanguage, string> = {
+  python: "    ",
+  octave: "    ",
+  json: "  ",
+  yaml: "  ",
+  toml: "  ",
+  shell: "  ",
+  cpp: "    ",
+  javascript: "  ",
+  jsx: "  ",
+  typescript: "  ",
+  tsx: "  ",
+  html: "  ",
+  css: "  ",
+  rust: "    ",
+};
+
+/** How many lines from the top detectIndentUnit reads. */
+const INDENT_SAMPLE_LINES = 2000;
+
+/**
+ * The indent unit a file already uses: a tab, 2 spaces or 4 spaces, or null
+ * when its text does not say. Each indented line counts the step it takes
+ * from the line above, so arguments aligned under a bracket and the jumps
+ * back out of a block do not count. Tab lines against space lines decide
+ * between the two; among spaces, the step of 2 or 4 seen most often wins,
+ * and a tie says nothing.
+ */
+export function detectIndentUnit(text: string): string | null {
+  let tabLines = 0;
+  let spaceLines = 0;
+  const steps = new Map<number, number>();
+  let previous = 0;
+  for (const line of text.split("\n", INDENT_SAMPLE_LINES)) {
+    if (line.trim() === "") continue;
+    const lead = /^[ \t]*/.exec(line)?.[0] ?? "";
+    if (lead.includes("\t")) {
+      tabLines++;
+      continue;
+    }
+    if (lead.length > 0) spaceLines++;
+    const step = lead.length - previous;
+    if (step === 2 || step === 4) steps.set(step, (steps.get(step) ?? 0) + 1);
+    previous = lead.length;
+  }
+  if (tabLines > spaceLines) return "\t";
+  const twos = steps.get(2) ?? 0;
+  const fours = steps.get(4) ?? 0;
+  if (twos === fours) return null;
+  return twos > fours ? "  " : "    ";
+}
+
+/**
+ * The indent unit for a code file, which Enter and Tab indent by: the one its
+ * text uses, or its language's usual one. Without it every language would
+ * indent by CodeMirror's 2 spaces, and in a 4-space Python file Enter would
+ * give lines that raise IndentationError.
+ */
+export function codeIndentUnit(language: CodeLanguage, text: string): string {
+  return detectIndentUnit(text) ?? USUAL_INDENT[language];
+}
+
 const loaded = new Map<CodeLanguage, Extension>();
 const loading = new Map<CodeLanguage, Promise<Extension | null>>();
 

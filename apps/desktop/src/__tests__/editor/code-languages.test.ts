@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { toggleComment } from "@codemirror/commands";
-import { ensureSyntaxTree, language } from "@codemirror/language";
+import {
+  deleteCharBackward,
+  indentMore,
+  insertNewlineAndIndent,
+  toggleComment,
+} from "@codemirror/commands";
+import { ensureSyntaxTree, indentUnit, language } from "@codemirror/language";
 import { EditorState, type Extension } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import {
   type CodeLanguage,
+  codeIndentUnit,
   codeLanguageFor,
+  detectIndentUnit,
   loadCodeLanguage,
   loadedCodeLanguage,
 } from "@/components/workspace/editor/code-languages";
@@ -164,5 +172,150 @@ describe("the comment toggle", () => {
 
   it("leaves JSON alone, which has no comments", async () => {
     expect(await toggled("json", '{"a": 1}')).toBe('{"a": 1}');
+  });
+});
+
+describe("detectIndentUnit", () => {
+  it.each<[string, string, string]>([
+    [
+      "four spaces",
+      "def f(x):\n    if x:\n        return 1\n    return 2\n",
+      "    ",
+    ],
+    ["two spaces", "def f(x):\n  if x:\n    return 1\n  return 2\n", "  "],
+    ["tabs", "def f(x):\n\tif x:\n\t\treturn 1\n\treturn 2\n", "\t"],
+    ["CRLF line ends", "fn main() {\r\n    let a = 1;\r\n}\r\n", "    "],
+  ])("reads %s", (_, text, expected) => {
+    expect(detectIndentUnit(text)).toBe(expected);
+  });
+
+  it("is not misled by arguments aligned under a bracket", () => {
+    const text = [
+      "def plot(ax, data):",
+      "    line = ax.plot(data.x,",
+      "                   data.y)",
+      "    if line:",
+      "        ax.legend()",
+      "    for k in data:",
+      "        print(k)",
+      "",
+    ].join("\n");
+    expect(detectIndentUnit(text)).toBe("    ");
+  });
+
+  it.each([
+    ["an empty file", ""],
+    ["a file with no indented line", "import os\nx = 1\n"],
+    ["one step of 2 against one of 4", "a:\n  b: 1\nc:\n    d: 1\n"],
+    ["steps of 3 spaces", "a:\n   b:\n      c: 1\n"],
+    ["a call aligned under its bracket", "x = f(a,\n      b)\n"],
+  ])("says nothing for %s", (_, text) => {
+    expect(detectIndentUnit(text)).toBeNull();
+  });
+});
+
+describe("codeIndentUnit", () => {
+  it.each<[CodeLanguage, string]>([
+    ["python", "    "],
+    ["rust", "    "],
+    ["cpp", "    "],
+    ["octave", "    "],
+    ["javascript", "  "],
+    ["typescript", "  "],
+    ["json", "  "],
+    ["yaml", "  "],
+    ["html", "  "],
+    ["css", "  "],
+    ["shell", "  "],
+    ["toml", "  "],
+  ])("starts a new %s file with %j", (lang, expected) => {
+    expect(codeIndentUnit(lang, "")).toBe(expected);
+  });
+
+  it("follows the file over the language's usual unit", () => {
+    expect(codeIndentUnit("python", "if x:\n  y = 1\n")).toBe("  ");
+    expect(codeIndentUnit("python", "if x:\n\ty = 1\n")).toBe("\t");
+    expect(codeIndentUnit("json", '{\n    "a": 1\n}\n')).toBe("    ");
+  });
+});
+
+describe("Enter and Tab in code files", () => {
+  /** The state of a code file as the editor sets it up, cursor at the end. */
+  async function codeState(lang: CodeLanguage, doc: string) {
+    const extension = await loadCodeLanguage(lang);
+    return EditorState.create({
+      doc,
+      selection: { anchor: doc.length },
+      extensions: [
+        extension as Extension,
+        indentUnit.of(codeIndentUnit(lang, doc)),
+      ],
+    });
+  }
+
+  /** The indentation Enter gives the new line after `doc`. */
+  async function enterAfter(lang: CodeLanguage, doc: string): Promise<string> {
+    let state = await codeState(lang, doc);
+    insertNewlineAndIndent({
+      state,
+      dispatch: (tr) => {
+        state = tr.state;
+      },
+    });
+    return state.doc.lineAt(state.doc.length).text;
+  }
+
+  // A 4-space Python file, as PEP 8 writes it.
+  const PY = "def f(x):\n    a = 1\n    if x:\n        b = 2";
+
+  it.each<[string, string, string]>([
+    ["a def line", "def f(x):", "    "],
+    ["a line in a function", "def f(x):\n    a = 1", "    "],
+    ["an if line in a function", "def f(x):\n    a = 1\n    if x:", "        "],
+    ["a line in an if block", PY, "        "],
+  ])("in 4-space Python, Enter after %s indents to the block", async (_, doc, expected) => {
+    expect(await enterAfter("python", doc)).toBe(expected);
+  });
+
+  it("follows a 2-space Python file", async () => {
+    expect(await enterAfter("python", "def f(x):\n  if x:")).toBe("    ");
+    expect(await enterAfter("python", "def f(x):\n  a = 1")).toBe("  ");
+  });
+
+  it("indents a tab-indented Python file with tabs", async () => {
+    expect(await enterAfter("python", "def f(x):\n\tif x:")).toBe("\t\t");
+  });
+
+  it("indents Rust and C blocks by four spaces", async () => {
+    expect(await enterAfter("rust", "fn main() {")).toBe("    ");
+    expect(await enterAfter("cpp", "int main(void) {")).toBe("    ");
+    expect(await enterAfter("cpp", "int main(void) {\n    if (a) {")).toBe(
+      "        ",
+    );
+  });
+
+  it("keeps JavaScript at two spaces", async () => {
+    expect(await enterAfter("javascript", "function f() {")).toBe("  ");
+  });
+
+  it("steps back one unit with Backspace in the indentation", async () => {
+    // Backspace is a view command, so it runs on a view.
+    const view = new EditorView({
+      state: await codeState("python", `${PY}\n        `),
+    });
+    deleteCharBackward(view);
+    expect(view.state.doc.lineAt(view.state.doc.length).text).toBe("    ");
+    view.destroy();
+  });
+
+  it("indents by the same unit with Tab", async () => {
+    let state = await codeState("python", "x = 1");
+    indentMore({
+      state,
+      dispatch: (tr) => {
+        state = tr.state;
+      },
+    });
+    expect(state.doc.toString()).toBe("    x = 1");
   });
 });

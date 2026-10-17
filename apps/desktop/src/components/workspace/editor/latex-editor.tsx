@@ -17,7 +17,11 @@ import {
   indentLess,
   toggleComment,
 } from "@codemirror/commands";
-import { syntaxHighlighting, syntaxTreeAvailable } from "@codemirror/language";
+import {
+  indentUnit,
+  syntaxHighlighting,
+  syntaxTreeAvailable,
+} from "@codemirror/language";
 import { oneDark, oneDarkHighlightStyle } from "@codemirror/theme-one-dark";
 import { defaultHighlightStyle } from "@codemirror/language";
 import { useTheme } from "next-themes";
@@ -38,6 +42,7 @@ import {
 import { latex, latexLinter } from "codemirror-lang-latex";
 import { bibtex } from "./lang-bibtex";
 import {
+  codeIndentUnit,
   codeLanguageFor,
   loadCodeLanguage,
   loadedCodeLanguage,
@@ -653,6 +658,8 @@ export function LatexEditor() {
 
     // A code file (.py, .json, ...) gets its own language, loaded the first
     // time one opens; until then it is plain. Others keep LaTeX or BibTeX.
+    // A code file also indents by the unit its text uses (or its language's
+    // usual one), so Enter in a 4-space .py file gives 4-space lines.
     const codeLanguage =
       activeFile?.type === "other"
         ? codeLanguageFor(activeFile.relativePath)
@@ -679,6 +686,9 @@ export function LatexEditor() {
               ? bibtex()
               : latex({ enableLinting: false }),
         ),
+        ...(codeLanguage
+          ? [indentUnit.of(codeIndentUnit(codeLanguage, currentContent))]
+          : []),
         ...(activeFile?.type === "tex"
           ? [
               linter((view) => {

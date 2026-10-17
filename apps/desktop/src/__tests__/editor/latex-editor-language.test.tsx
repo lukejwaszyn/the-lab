@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { language } from "@codemirror/language";
+import { indentUnit, language } from "@codemirror/language";
+import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { latexLanguage } from "codemirror-lang-latex";
 import { loadCodeLanguage } from "@/components/workspace/editor/code-languages";
@@ -105,16 +106,21 @@ const FILES = [
   projectFile("macros.sty", "style", "\\newcommand{\\R}{\\mathbb{R}}\n"),
   projectFile("sim/model.py", "other", "x = 1  # a note\n"),
   projectFile("src/lib.rs", "other", "fn main() {}\n"),
+  projectFile("tools/short.py", "other", "def f():\n  return 1\n"),
 ];
 
 let container: HTMLDivElement;
 let root: Root;
 
-function editorLanguage() {
+function editorState() {
   const dom = container.querySelector<HTMLElement>(".cm-editor");
   const view = dom ? EditorView.findFromDOM(dom) : null;
   if (!view) throw new Error("no editor is open");
-  return view.state.facet(language);
+  return view.state;
+}
+
+function editorLanguage() {
+  return editorState().facet(language);
 }
 
 async function open(id: string) {
@@ -185,6 +191,18 @@ describe("the editor's language", () => {
     expect(editorLanguage()?.name).toBe("python");
     await open("main.tex");
     expect(editorLanguage()).toBe(latexLanguage);
+  });
+
+  it("indents a .py file by its own unit and leaves .tex as it was", async () => {
+    await open("sim/model.py");
+    expect(editorState().facet(indentUnit)).toBe("    ");
+    await open("tools/short.py");
+    expect(editorState().facet(indentUnit)).toBe("  ");
+    await open("main.tex");
+    // CodeMirror's default, which a .tex file had before.
+    expect(editorState().facet(indentUnit)).toBe(
+      EditorState.create().facet(indentUnit),
+    );
   });
 
   it("keeps LaTeX when a pack finishes loading after its file was left", async () => {
