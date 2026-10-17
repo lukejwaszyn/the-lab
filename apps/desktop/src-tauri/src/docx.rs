@@ -22,6 +22,8 @@ pub struct DocxFileState {
     pub size: u64,
     /// Word's owner file ("~$...") is beside the document.
     pub open_in_word: bool,
+    /// The file cannot be written, so the tab only shows it.
+    pub read_only: bool,
 }
 
 /// The names Word gives the owner file of `name` while it has it open: "~$"
@@ -70,12 +72,14 @@ pub fn file_state(path: &Path) -> DocxFileState {
             modified_ms: modified_ms(&metadata),
             size: metadata.len(),
             open_in_word,
+            read_only: metadata.permissions().readonly(),
         },
         Err(_) => DocxFileState {
             exists: false,
             modified_ms: None,
             size: 0,
             open_in_word,
+            read_only: false,
         },
     }
 }
@@ -88,8 +92,9 @@ pub const SAVE_SUFFIX: &str = ".thelab-save";
 /// to a temporary file in the same folder, which is then renamed over the
 /// document, so a failed or interrupted save leaves the old file whole.
 /// The new file keeps the old one's permissions. A symlink is followed and
-/// its target replaced. Only an existing `.docx` that can be written is
-/// replaced.
+/// its target replaced. Only a `.docx` that can be written is replaced; one
+/// deleted from disk while its tab was open is written again, if its folder
+/// is still there.
 pub fn save_atomically(path: &Path, bytes: &[u8]) -> Result<DocxFileState, String> {
     let is_docx = path
         .extension()
@@ -98,18 +103,30 @@ pub fn save_atomically(path: &Path, bytes: &[u8]) -> Result<DocxFileState, Strin
     if !is_docx {
         return Err(format!("{} is not a .docx file.", path.display()));
     }
-    let target: PathBuf =
-        fs::canonicalize(path).map_err(|e| format!("{} cannot be saved: {e}", path.display()))?;
-    let metadata = fs::metadata(&target).map_err(|e| e.to_string())?;
-    if !metadata.is_file() {
-        return Err(format!("{} is not a file.", path.display()));
-    }
-    if metadata.permissions().readonly() {
-        return Err(format!(
-            "{} is read-only, so it was not saved.",
-            path.display()
-        ));
-    }
+    let (target, permissions): (PathBuf, Option<fs::Permissions>) = match fs::canonicalize(path) {
+        Ok(target) => {
+            let metadata = fs::metadata(&target).map_err(|e| e.to_string())?;
+            if !metadata.is_file() {
+                return Err(format!("{} is not a file.", path.display()));
+            }
+            if metadata.permissions().readonly() {
+                return Err(format!(
+                    "{} is read-only, so it was not saved.",
+                    path.display()
+                ));
+            }
+            (target, Some(metadata.permissions()))
+        }
+        // Gone from disk (but not a broken symlink): write it again.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && fs::symlink_metadata(path).is_err()
+                && path.parent().is_some_and(Path::is_dir) =>
+        {
+            (path.to_path_buf(), None)
+        }
+        Err(e) => return Err(format!("{} cannot be saved: {e}", path.display())),
+    };
     let dir = target
         .parent()
         .ok_or_else(|| format!("{} has no folder.", path.display()))?;
@@ -129,7 +146,9 @@ pub fn save_atomically(path: &Path, bytes: &[u8]) -> Result<DocxFileState, Strin
             .open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::set_permissions(&temp, metadata.permissions())?;
+        if let Some(permissions) = &permissions {
+            fs::set_permissions(&temp, permissions.clone())?;
+        }
         fs::rename(&temp, &target)
     })();
     if let Err(e) = written {
@@ -218,6 +237,7 @@ pub async fn docx_file_state(path: String) -> DocxFileState {
             modified_ms: None,
             size: 0,
             open_in_word: false,
+            read_only: false,
         })
 }
 
@@ -344,24 +364,34 @@ mod tests {
     }
 
     #[test]
-    fn only_an_existing_writable_docx_is_saved() {
+    fn only_a_writable_docx_in_an_existing_folder_is_saved() {
         let dir = tempfile::tempdir().unwrap();
         let text = dir.path().join("notes.txt");
         fs::write(&text, b"keep").unwrap();
         assert!(save_atomically(&text, b"x").is_err());
         assert_eq!(fs::read(&text).unwrap(), b"keep");
-        assert!(save_atomically(&dir.path().join("missing.docx"), b"x").is_err());
-        assert!(!dir.path().join("missing.docx").exists());
+        assert!(save_atomically(&dir.path().join("no folder/missing.docx"), b"x").is_err());
 
         let locked = dir.path().join("locked.docx");
         fs::write(&locked, b"keep").unwrap();
         let mut permissions = fs::metadata(&locked).unwrap().permissions();
         permissions.set_readonly(true);
         fs::set_permissions(&locked, permissions).unwrap();
+        assert!(file_state(&locked).read_only);
         assert!(save_atomically(&locked, b"x").is_err());
         assert_eq!(fs::read(&locked).unwrap(), b"keep");
         let names = fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(names, 2, "a refused save leaves no temporary file");
+    }
+
+    #[test]
+    fn a_file_deleted_while_open_is_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("gone.docx");
+        let state = save_atomically(&doc, b"edits").unwrap();
+        assert!(state.exists);
+        assert!(!state.read_only);
+        assert_eq!(fs::read(&doc).unwrap(), b"edits");
     }
 
     #[test]
