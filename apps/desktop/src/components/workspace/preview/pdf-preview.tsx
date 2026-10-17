@@ -25,7 +25,10 @@ import {
 } from "@/stores/document-store";
 import { useHistoryStore } from "@/stores/history-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
-import { useSettingsStore } from "@/stores/settings-store";
+import {
+  useSettingsStore,
+  type CompilerBackend,
+} from "@/stores/settings-store";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -43,6 +46,7 @@ import {
 import { HistoryPanel } from "@/components/workspace/history-panel";
 import {
   compileLatex,
+  compileErrorLines,
   synctexEdit,
   resolveCompileTarget,
   formatCompileError,
@@ -423,9 +427,8 @@ export function PdfPreview() {
           return;
         }
         const { rootId, targetPath } = resolved;
-        const texlive =
-          useSettingsStore.getState().compilerBackend === "texlive";
-        const data = await compileLatex(projectRoot, targetPath, texlive);
+        const engine = useSettingsStore.getState().compilerBackend;
+        const data = await compileLatex(projectRoot, targetPath, engine);
         setPdfData(data, rootId);
       } catch (error) {
         setCompileError(formatCompileError(error));
@@ -562,8 +565,8 @@ export function PdfPreview() {
     const compileStart = Date.now();
     try {
       await saveAllFiles();
-      const texlive = useSettingsStore.getState().compilerBackend === "texlive";
-      const data = await compileLatex(state.projectRoot, targetFile, texlive);
+      const engine = useSettingsStore.getState().compilerBackend;
+      const data = await compileLatex(state.projectRoot, targetFile, engine);
       setPdfData(data, rootId);
     } catch (error) {
       setCompileError(formatCompileError(error), rootId);
@@ -627,14 +630,7 @@ export function PdfPreview() {
 
   const renderContent = () => {
     if (compileError) {
-      const errors = [
-        ...new Set(
-          compileError
-            .split(/\s*!\s*/)
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0 && s !== "Compilation failed"),
-        ),
-      ];
+      const errors = compileErrorLines(compileError);
 
       const handleFixWithChat = () => {
         const errorList = errors.map((e) => `- ${e}`).join("\n");
@@ -808,9 +804,7 @@ export function PdfPreview() {
         <div className="flex min-w-0 shrink-0 items-center gap-1">
           <Select
             value={compilerBackend}
-            onValueChange={(v) =>
-              setCompilerBackend(v as "tectonic" | "texlive")
-            }
+            onValueChange={(v) => setCompilerBackend(v as CompilerBackend)}
           >
             <SelectTrigger
               size="sm"
@@ -819,8 +813,9 @@ export function PdfPreview() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value="auto">Auto</SelectItem>
               <SelectItem value="tectonic">Tectonic</SelectItem>
-              <SelectItem value="texlive">TeXLive</SelectItem>
+              <SelectItem value="texlive">TeX Live</SelectItem>
             </SelectContent>
           </Select>
           {isSaving && (

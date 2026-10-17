@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { problemLocation, type CompileReport } from "@/lib/latex-compiler";
 import {
   AlertCircleIcon,
   AlertTriangleIcon,
@@ -15,14 +16,44 @@ export interface DiagnosticItem {
   severity: string;
   message: string;
   line: number;
+  /** "compile" for an error or warning of the last compile, which may be in
+   *  any file of the project; lint items of the open file leave it out. */
+  source?: "compile";
+  /** A compile problem's file, relative to the project when it is one of
+   *  its own; absent when the engine did not say. `line` is 0 when unknown. */
+  file?: string;
 }
 
 interface ProblemsPanelProps {
   diagnostics: DiagnosticItem[];
   fileName: string;
-  onNavigate: (from: number) => void;
-  onFixWithChat: (message: string, line: number) => void;
+  onNavigate: (diagnostic: DiagnosticItem) => void;
+  onFixWithChat: (diagnostic: DiagnosticItem) => void;
   onFixAllWithChat?: () => void;
+}
+
+/** Where a problem is, as the panel and the chat prompts name it: "" for
+ *  a compile problem the engine did not place. */
+export function diagnosticLocation(d: DiagnosticItem, fileName: string) {
+  return d.source === "compile"
+    ? problemLocation({ file: d.file ?? null, line: d.line || null })
+    : `${fileName}:${d.line}`;
+}
+
+/** The last compile's errors and warnings, as items of the panel. */
+export function compileDiagnostics(
+  report: CompileReport | null | undefined,
+): DiagnosticItem[] {
+  if (!report) return [];
+  return [...report.errors, ...report.warnings].map((problem) => ({
+    from: 0,
+    to: 0,
+    severity: problem.severity,
+    message: problem.message,
+    line: problem.line ?? 0,
+    source: "compile" as const,
+    ...(problem.file ? { file: problem.file } : {}),
+  }));
 }
 
 function SeverityIcon({ severity }: { severity: string }) {
@@ -100,19 +131,23 @@ export function ProblemsPanel({
             <div
               key={`${d.from}-${d.message}-${i}`}
               className="group flex cursor-pointer items-center gap-2 px-3 py-1 text-xs transition-colors hover:bg-muted/50"
-              onClick={() => onNavigate(d.from)}
+              onClick={() => onNavigate(d)}
             >
               <SeverityIcon severity={d.severity} />
-              <span className="min-w-0 flex-1 truncate text-foreground">
+              <span
+                className="min-w-0 flex-1 truncate text-foreground"
+                title={d.message}
+              >
                 {d.message}
               </span>
               <span className="shrink-0 text-muted-foreground">
-                {fileName}:{d.line}
+                {diagnosticLocation(d, fileName) ||
+                  (d.source === "compile" ? "compile" : "")}
               </span>
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  onFixWithChat(d.message, d.line);
+                  onFixWithChat(d);
                 }}
                 className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100"
                 title="Fix with chat"

@@ -55,10 +55,12 @@ import {
 import { useHistoryStore, type FileDiff } from "@/stores/history-store";
 import {
   compileLatex,
+  lineOffset,
   resolveCompileTarget,
   formatCompileError,
 } from "@/lib/latex-compiler";
 import { useSettingsStore } from "@/stores/settings-store";
+import { useCompileReportStore } from "@/stores/compile-report-store";
 import { EditorToolbar } from "./editor-toolbar";
 import { SelectionToolbar, type ToolbarAction } from "./selection-toolbar";
 import { Button } from "@/components/ui/button";
@@ -81,7 +83,12 @@ import { ClaudeChatDrawer } from "@/components/claude-chat/claude-chat-drawer";
 import { ProposedChangesPanel } from "@/components/claude-chat/proposed-changes-panel";
 import { ImagePreview } from "./image-preview";
 import { SearchPanel } from "./search-panel";
-import { ProblemsPanel, type DiagnosticItem } from "./problems-panel";
+import {
+  ProblemsPanel,
+  compileDiagnostics,
+  diagnosticLocation,
+  type DiagnosticItem,
+} from "./problems-panel";
 import { PdfViewer } from "@/components/workspace/preview/pdf-viewer";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { createLogger } from "@/lib/debug/logger";
@@ -156,6 +163,19 @@ export function LatexEditor() {
     current: 0,
   });
   const [diagnostics, setDiagnostics] = useState<DiagnosticItem[]>([]);
+  // The last compile's errors and warnings (any file, a .bib included):
+  // errors first, then the open file's lint items, then warnings.
+  const compileReport = useCompileReportStore((s) =>
+    projectRoot ? s.reports[projectRoot] : undefined,
+  );
+  const problems = useMemo(() => {
+    const compiled = compileDiagnostics(compileReport);
+    return [
+      ...compiled.filter((d) => d.severity === "error"),
+      ...diagnostics,
+      ...compiled.filter((d) => d.severity !== "error"),
+    ];
+  }, [compileReport, diagnostics]);
   const [selectionCoords, setSelectionCoords] = useState<{
     top: number;
     left: number;
@@ -408,9 +428,8 @@ export function LatexEditor() {
         .getState()
         .createSnapshot(projectRoot, "[compile] Pre-compile")
         .catch(() => {});
-      const useTexlive =
-        useSettingsStore.getState().compilerBackend === "texlive";
-      const data = await compileLatex(projectRoot, targetPath, useTexlive);
+      const engine = useSettingsStore.getState().compilerBackend;
+      const data = await compileLatex(projectRoot, targetPath, engine);
       setPdfData(data, rootId);
     } catch (error) {
       setCompileError(formatCompileError(error), rootId);
@@ -953,6 +972,40 @@ export function LatexEditor() {
     }
   }, [activeFileChange, isTextFile]);
 
+  // A problem of the panel: a lint item is in the open file; a compile
+  // problem may be in another file, which is opened at its line.
+  const revealProblem = (d: DiagnosticItem) => {
+    const view = viewRef.current;
+    const reveal = (position: number) => {
+      if (!view) return;
+      view.dispatch({
+        selection: { anchor: position },
+        effects: EditorView.scrollIntoView(position, { y: "center" }),
+      });
+      view.focus();
+    };
+    if (d.source !== "compile") {
+      reveal(d.from);
+      return;
+    }
+    if (!d.file) return;
+    const normalize = (p: string) => p.replace(/\\/g, "/").replace(/^\.\//, "");
+    const wanted = normalize(d.file);
+    const state = useDocumentStore.getState();
+    const target = state.files.find(
+      (f) => normalize(f.relativePath) === wanted,
+    );
+    if (!target) return;
+    if (target.id === state.activeFileId && view) {
+      const doc = view.state.doc;
+      reveal(doc.line(Math.max(1, Math.min(d.line || 1, doc.lines))).from);
+      return;
+    }
+    state.setActiveFile(target.id);
+    const offset = lineOffset(target.content ?? "", d.line || 1);
+    setTimeout(() => state.requestJumpToPosition(offset), 100);
+  };
+
   useEffect(() => {
     const view = viewRef.current;
     if (!view || jumpToPosition === null) return;
@@ -1355,42 +1408,43 @@ export function LatexEditor() {
         <ClaudeChatDrawer />
       </div>
       {/* Text-editor-only bottom panels */}
-      {!isPdf &&
-        !isImage &&
-        !isLargeFileNotLoaded &&
-        diagnostics.length > 0 && (
-          <ProblemsPanel
-            diagnostics={diagnostics}
-            fileName={activeFile?.relativePath ?? "main.tex"}
-            onNavigate={(from) => {
-              const view = viewRef.current;
-              if (!view) return;
-              view.dispatch({
-                selection: { anchor: from },
-                effects: EditorView.scrollIntoView(from, { y: "center" }),
-              });
-              view.focus();
-            }}
-            onFixWithChat={(message, line) => {
-              const fileName = activeFile?.relativePath ?? "main.tex";
-              const ctx = `[Lint error in ${fileName}:${line}]\n[Error: ${message}]`;
-              useClaudeChatStore
-                .getState()
-                .sendPrompt(`${ctx}\n\nFix this lint error.`);
-            }}
-            onFixAllWithChat={() => {
-              const fileName = activeFile?.relativePath ?? "main.tex";
-              const errorList = diagnostics
-                .map((d) => `- ${fileName}:${d.line} — ${d.message}`)
-                .join("\n");
-              useClaudeChatStore
-                .getState()
-                .sendPrompt(
-                  `[Lint errors in ${fileName}]\n${errorList}\n\nFix all these lint errors.`,
-                );
-            }}
-          />
-        )}
+      {!isPdf && !isImage && !isLargeFileNotLoaded && problems.length > 0 && (
+        <ProblemsPanel
+          diagnostics={problems}
+          fileName={activeFile?.relativePath ?? "main.tex"}
+          onNavigate={(d) => revealProblem(d)}
+          onFixWithChat={(d) => {
+            const fileName = activeFile?.relativePath ?? "main.tex";
+            const where = diagnosticLocation(d, fileName);
+            const kind = d.source === "compile" ? "Compile" : "Lint";
+            const ctx = `[${kind} ${d.severity} in ${where || "the build"}]\n[Error: ${d.message}]`;
+            useClaudeChatStore
+              .getState()
+              .sendPrompt(
+                `${ctx}\n\nFix this ${kind.toLowerCase()} ${d.severity === "warning" ? "warning" : "error"}.`,
+              );
+          }}
+          onFixAllWithChat={() => {
+            const fileName = activeFile?.relativePath ?? "main.tex";
+            const errorList = problems
+              .map(
+                (d) =>
+                  `- ${diagnosticLocation(d, fileName) || "(no file)"} — ${d.message}`,
+              )
+              .join("\n");
+            const compiled = problems.some((d) => d.source === "compile");
+            const heading = compiled
+              ? "[Compile and lint problems]"
+              : `[Lint errors in ${fileName}]`;
+            const ask = compiled
+              ? "Fix all these problems."
+              : "Fix all these lint errors.";
+            useClaudeChatStore
+              .getState()
+              .sendPrompt(`${heading}\n${errorList}\n\n${ask}`);
+          }}
+        />
+      )}
       {!isPdf && !isImage && !isLargeFileNotLoaded && activeFileChange && (
         <ProposedChangesPanel
           change={activeFileChange}

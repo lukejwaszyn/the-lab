@@ -522,13 +522,8 @@ export function useClaudeEvents() {
           useDocumentStore.getState().setPendingRecompile(false);
           try {
             await useDocumentStore.getState().saveAllFiles();
-            const texlive =
-              useSettingsStore.getState().compilerBackend === "texlive";
-            const pdfData = await compileLatex(
-              projectRoot,
-              targetPath,
-              texlive,
-            );
+            const engine = useSettingsStore.getState().compilerBackend;
+            const pdfData = await compileLatex(projectRoot, targetPath, engine);
             useDocumentStore.getState().setPdfData(pdfData, rootId);
           } catch (err) {
             useDocumentStore

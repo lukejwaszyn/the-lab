@@ -701,10 +701,9 @@ async function loadProjectPreview(
 
     if (texFile) {
       try {
-        const useTexlive =
-          useSettingsStore.getState().compilerBackend === "texlive";
+        const engine = useSettingsStore.getState().compilerBackend;
         const pdfBytes = await enqueueProjectPreviewCompile(() =>
-          compileLatex(project.path, texFile.relativePath, useTexlive),
+          compileLatex(project.path, texFile.relativePath, engine),
         );
         const data: ProjectPreviewData = {
           kind: "pdf",
