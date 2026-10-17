@@ -32,11 +32,9 @@ git2 = { version = "0.20", default-features = false, features = ["vendored-libgi
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 which = "7"
-tectonic = { version = "0.15", default-features = true, features = ["external-harfbuzz"] }
-# NOTE: Building tectonic requires external harfbuzz/graphite2/icu/freetype:
-#   macOS:   brew install icu4c harfbuzz pkg-config
-#   Linux:   apt install libicu-dev libgraphite2-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev
-#   Windows: vcpkg install harfbuzz[graphite2] freetype icu fontconfig (with TECTONIC_DEP_BACKEND=vcpkg)
+# The Lab's LaTeX core (crates/thelab-core): compiles with the installed
+# tectonic or latexmk, chosen per document, and parses their logs.
+thelab-core = { path = "../../../crates/thelab-core" }
 flate2 = "1"
 tar = "0.4"
 

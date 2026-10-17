@@ -1,27 +1,35 @@
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use thelab_core::compile::{CompileOptions, CompileResult, Engine, BUILD_DIRECTORY};
+use thelab_core::logparse::{Diagnostic, Severity};
 use tokio::sync::{Mutex, Semaphore};
 
 const MAX_CONCURRENT: usize = 3;
 
 /// Windows CREATE_NO_WINDOW flag to prevent console windows from flashing
-/// when spawning TeXLive/Tectonic child processes from the GUI app.
+/// when spawning TeXLive child processes from the GUI app.
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-struct BuildInfo {
+/// Where the last compile of a project left its SyncTeX data.
+pub(crate) struct BuildInfo {
+    /// The copy of the project the engine ran on (see `persistent_build_dir`).
     work_dir: PathBuf,
+    /// The folder the engine ran in: relative SyncTeX inputs start here.
+    engine_dir: PathBuf,
     main_file_name: String,
 }
 
 #[derive(Clone)]
 pub struct LatexCompilerState {
     last_builds: Arc<Mutex<HashMap<String, BuildInfo>>>,
+    /// The last compile's report per project, for the problems panel.
+    last_reports: Arc<Mutex<HashMap<String, CompileReport>>>,
     /// Per-project locks to prevent concurrent compilations on the same build directory.
     project_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     semaphore: Arc<Semaphore>,
@@ -31,6 +39,7 @@ impl Default for LatexCompilerState {
     fn default() -> Self {
         Self {
             last_builds: Arc::new(Mutex::new(HashMap::new())),
+            last_reports: Arc::new(Mutex::new(HashMap::new())),
             project_locks: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT)),
         }
@@ -44,54 +53,172 @@ pub struct SynctexResult {
     pub column: u32,
 }
 
-// --- Helpers ---
+// --- Engine choice ---
 
-fn extract_error_lines(log: &str) -> String {
-    if log.is_empty() {
-        return String::new();
-    }
+/// The engine menu of the PDF preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineChoice {
+    /// thelab chooses per document: latexmk for biblatex with biber and for
+    /// LuaLaTeX, Tectonic otherwise, whichever is installed.
+    Auto,
+    /// The installed `tectonic` program.
+    Tectonic,
+    /// TeX Live through `latexmk`.
+    TexLive,
+}
 
-    let lines: Vec<&str> = log.lines().collect();
-
-    let mut blocks: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < lines.len() && blocks.len() < 5 {
-        let line = lines[i];
-        let is_error_start =
-            line.starts_with('!') || line.contains("Error:") || line.contains("error:");
-
-        if is_error_start {
-            let end = (i + 14).min(lines.len());
-            blocks.push(lines[i..end].join("\n"));
-            i = end;
-            continue;
+impl EngineChoice {
+    pub(crate) fn parse(name: Option<&str>) -> Result<Self, String> {
+        match name.map(|n| n.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("auto") => Ok(Self::Auto),
+            Some("tectonic") => Ok(Self::Tectonic),
+            Some("texlive") | Some("latexmk") => Ok(Self::TexLive),
+            Some(other) => Err(format!(
+                "Unknown engine \"{other}\": expected auto, tectonic or texlive"
+            )),
         }
-
-        i += 1;
     }
 
-    if !blocks.is_empty() {
-        let mut result = blocks.join("\n\n");
-        result.push_str("\n\n---- Engine output ----\n");
-        let tail_start = lines.len().saturating_sub(20);
-        result.push_str(&lines[tail_start..].join("\n"));
-        return result;
+    /// The engine to ask thelab for; `None` lets it choose (and lets a
+    /// project's `thelab.toml` choose first).
+    fn engine(self) -> Option<Engine> {
+        match self {
+            Self::Auto => None,
+            Self::Tectonic => Some(Engine::Tectonic),
+            Self::TexLive => Some(Engine::Latexmk),
+        }
     }
-
-    if lines.iter().any(|l| l.contains("No pages of output")) {
-        return "No pages of output. Add visible content to the document body.".to_string();
-    }
-
-    // Fallback: return tail of log
-    let start = log.len().saturating_sub(500);
-    log[start..].to_string()
 }
 
-/// Check if the log contains real TeX errors (! lines or Error: messages).
-fn has_real_errors(log: &str) -> bool {
-    log.lines()
-        .any(|l| l.starts_with('!') || l.contains("Error:"))
+// --- Compile report ---
+
+/// One error or warning of a compile, for the problems panel.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompileProblem {
+    /// `error` or `warning`.
+    pub severity: &'static str,
+    /// Relative to the project for its own files (a `.bib` file included),
+    /// absolute for others; absent when the engine did not say.
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub message: String,
 }
+
+impl CompileProblem {
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            severity: "error",
+            file: None,
+            line: None,
+            message: message.into(),
+        }
+    }
+
+    fn from_diagnostic(diagnostic: Diagnostic) -> Self {
+        Self {
+            severity: match diagnostic.severity {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+            },
+            file: diagnostic.file,
+            line: diagnostic.line,
+            message: diagnostic.message,
+        }
+    }
+
+    /// `file:line: message`, or as much of it as is known.
+    fn describe(&self) -> String {
+        // Messages may span lines (biber's do); the summary has one per line.
+        let message = self
+            .message
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        match (&self.file, self.line) {
+            (Some(file), Some(line)) => format!("{file}:{line}: {message}"),
+            (Some(file), None) => format!("{file}: {message}"),
+            _ => message,
+        }
+    }
+}
+
+/// What a compile found: the frontend reads it with `latex_compile_report`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompileReport {
+    pub project_dir: String,
+    pub main_file: String,
+    /// `tectonic` or `latexmk`; absent when no engine could be started.
+    pub engine: Option<&'static str>,
+    /// The engine succeeded with no errors and wrote a current PDF.
+    pub ok: bool,
+    /// A PDF of this run exists, even if the run also reported errors.
+    pub has_pdf: bool,
+    pub duration_ms: u64,
+    pub errors: Vec<CompileProblem>,
+    pub warnings: Vec<CompileProblem>,
+}
+
+impl CompileReport {
+    fn failed(project_dir: &Path, main_file: &str, message: impl Into<String>) -> Self {
+        Self {
+            project_dir: project_dir.to_string_lossy().to_string(),
+            main_file: main_file.to_string(),
+            engine: None,
+            ok: false,
+            has_pdf: false,
+            duration_ms: 0,
+            errors: vec![CompileProblem::error(message)],
+            warnings: Vec::new(),
+        }
+    }
+
+    fn from_result(project_dir: &Path, main_file: &str, result: CompileResult) -> Self {
+        Self {
+            project_dir: project_dir.to_string_lossy().to_string(),
+            main_file: main_file.to_string(),
+            engine: Some(result.engine.name()),
+            ok: result.ok,
+            has_pdf: result.pdf_path.is_some(),
+            duration_ms: result.duration_ms,
+            errors: result
+                .errors
+                .into_iter()
+                .map(CompileProblem::from_diagnostic)
+                .collect(),
+            warnings: result
+                .warnings
+                .into_iter()
+                .map(CompileProblem::from_diagnostic)
+                .collect(),
+        }
+    }
+
+    /// The message of a compile that left no PDF: one error per line, which
+    /// the PDF preview lists when it has no report to read.
+    fn failure_message(&self) -> String {
+        let backend = self.engine.unwrap_or("no engine");
+        let errors: Vec<String> = self.errors.iter().map(CompileProblem::describe).collect();
+        let details = if errors.is_empty() {
+            "No PDF was generated.".to_string()
+        } else {
+            errors.join("\n")
+        };
+        format!("Compilation failed ({backend})\n\n{details}")
+    }
+}
+
+/// What `compile_project` produced.
+pub(crate) struct CompileOutcome {
+    pub report: CompileReport,
+    /// The PDF of this run, if it wrote one.
+    pub pdf: Option<Vec<u8>>,
+    /// Where the SyncTeX data is, once an engine has run.
+    pub build: Option<BuildInfo>,
+}
+
+// --- Helpers ---
 
 #[derive(Debug, PartialEq)]
 enum TexEngine {
@@ -124,36 +251,6 @@ fn detect_tex_engine(content: &str) -> Option<TexEngine> {
         }
     }
     None
-}
-
-#[derive(Debug, PartialEq)]
-enum BibTool {
-    Biber,
-    BibTeX,
-    None,
-}
-
-/// Detect which bibliography tool is needed by scanning .tex content.
-fn detect_bib_tool(content: &str) -> BibTool {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('%') {
-            continue;
-        }
-        if trimmed.contains("\\usepackage") && trimmed.contains("biblatex") {
-            return BibTool::Biber;
-        }
-    }
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('%') {
-            continue;
-        }
-        if trimmed.contains("\\bibliography{") || trimmed.contains("\\addbibresource{") {
-            return BibTool::BibTeX;
-        }
-    }
-    BibTool::None
 }
 
 /// Resolve a TeXLive engine binary to its full path.
@@ -222,7 +319,19 @@ fn find_texlive_binary(name: &str) -> Result<PathBuf, String> {
     ))
 }
 
+/// Whether a directory of the project is never copied: hidden ones (.git,
+/// .claudeprism, .prism itself) and, at the top, the project's own `build/`,
+/// which thelab's CLI and MCP server write to. The copy's `build/` is the
+/// app's, and a PDF or latexmk database from there must not land in it.
+fn skip_directory(name: &str, at_top: bool) -> bool {
+    name.starts_with('.') || (at_top && name == BUILD_DIRECTORY)
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    copy_tree(src, dst, true)
+}
+
+fn copy_tree(src: &Path, dst: &Path, at_top: bool) -> std::io::Result<()> {
     if !dst.exists() {
         std::fs::create_dir_all(dst)?;
     }
@@ -231,12 +340,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if src_path.is_dir() {
-            // Skip hidden directories (.git, .claudeprism, etc.)
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with('.') {
+            if skip_directory(&entry.file_name().to_string_lossy(), at_top) {
                 continue;
             }
-            copy_dir_recursive(&src_path, &dst_path)?;
+            copy_tree(&src_path, &dst_path, false)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
         }
@@ -246,8 +353,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Sync only source files (.tex, .bib, .sty, .cls, .bst, images, .pdf figures) from project to build dir.
 /// Skips build artifacts (.aux, .log, .toc, .synctex.gz, etc.) to preserve them.
-/// Note: .pdf is NOT skipped — figure PDFs must be synced. The output PDF is managed by compile_latex.
+/// Note: .pdf is NOT skipped — figure PDFs must be synced. The engine writes its PDF to the copy's `build/`.
 fn sync_source_files(src: &Path, dst: &Path) -> std::io::Result<()> {
+    sync_tree(src, dst, true)
+}
+
+fn sync_tree(src: &Path, dst: &Path, at_top: bool) -> std::io::Result<()> {
     if !dst.exists() {
         std::fs::create_dir_all(dst)?;
     }
@@ -258,11 +369,12 @@ fn sync_source_files(src: &Path, dst: &Path) -> std::io::Result<()> {
         let dst_path = dst.join(&file_name);
         if src_path.is_dir() {
             let name = file_name.to_string_lossy();
-            if name.starts_with('.') || matches!(name.as_ref(), "node_modules" | "target" | "dist")
+            if skip_directory(&name, at_top)
+                || matches!(name.as_ref(), "node_modules" | "target" | "dist")
             {
                 continue;
             }
-            sync_source_files(&src_path, &dst_path)?;
+            sync_tree(&src_path, &dst_path, false)?;
         } else {
             let ext = src_path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let is_artifact = matches!(
@@ -329,8 +441,46 @@ fn sync_source_files(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Persistent build directory inside the project.
 /// Stored in `<project>/.prism/build/` — hidden from file tree (dot-prefix is filtered).
+/// It holds a copy of the project's sources; thelab writes the PDF, logs and
+/// SyncTeX data to the copy's own `build/`.
 fn persistent_build_dir(project_dir: &str) -> PathBuf {
     PathBuf::from(project_dir).join(".prism").join("build")
+}
+
+/// Removes `.` and `..` from a path without touching the disk.
+fn clean_path(path: &Path) -> PathBuf {
+    let mut cleaned = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                cleaned.pop();
+            }
+            other => cleaned.push(other),
+        }
+    }
+    cleaned
+}
+
+/// A SyncTeX input as the frontend's file list names it: relative to the
+/// project for files of the copy, otherwise as written. Engines write
+/// absolute paths (pdfTeX: `/copy/./main.tex`) or paths relative to the
+/// folder they ran in (`engine_dir`).
+fn project_relative(input: &str, work_dir: &Path, engine_dir: &Path) -> String {
+    let path = Path::new(input);
+    let absolute = if path.is_absolute() {
+        clean_path(path)
+    } else {
+        clean_path(&engine_dir.join(path))
+    };
+    match absolute.strip_prefix(clean_path(work_dir)) {
+        Ok(relative) => relative
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => input.to_string(),
+    }
 }
 
 // --- Thread priority ---
@@ -355,270 +505,104 @@ fn lower_thread_priority() {
     }
 }
 
-// --- Tectonic Compilation ---
+// --- Compilation through thelab-core ---
 
-pub(crate) fn compile_with_tectonic(work_dir: &Path, main_file: &str) -> Result<(), String> {
-    use tectonic::config::PersistentConfig;
-    use tectonic::driver::{OutputFormat, PassSetting, ProcessingSessionBuilder};
-    use tectonic::status::NoopStatusBackend;
-
-    let mut status = NoopStatusBackend {};
-
-    let config = PersistentConfig::open(false)
-        .map_err(|e| format!("Failed to open tectonic config: {}", e))?;
-
-    let bundle = config.default_bundle(false, &mut status).map_err(|e| {
-        format!(
-            "Failed to load tectonic bundle (check network connection): {}",
-            e
-        )
-    })?;
-
-    let format_cache = config
-        .format_cache_path()
-        .map_err(|e| format!("Failed to get format cache path: {}", e))?;
-
-    let mut builder = ProcessingSessionBuilder::default();
-    builder
-        .bundle(bundle)
-        .primary_input_path(work_dir.join(main_file))
-        .tex_input_name(main_file)
-        .filesystem_root(work_dir)
-        .output_dir(work_dir)
-        .format_name("latex")
-        .format_cache_path(format_cache)
-        .output_format(OutputFormat::Pdf)
-        .pass(PassSetting::Default)
-        .synctex(true)
-        .keep_intermediates(true)
-        .keep_logs(true);
-
-    let mut session = builder
-        .create(&mut status)
-        .map_err(|e| format!("Failed to create tectonic session: {}", e))?;
-
-    session.run(&mut status).map_err(|e| format!("{}", e))?;
-
-    Ok(())
-}
-
-/// Run tectonic compilation in an isolated subprocess.
+/// Compiles a project the way the app does: the sources are copied into
+/// `<project>/.prism/build/`, and `thelab_core::compile::compile` runs the
+/// engine on that copy, which writes to the copy's `build/`. Blocking.
 ///
-/// This avoids the font cache assertion failure (`font_cache.fonts == NULL`)
-/// that occurs when tectonic is called multiple times in the same process.
-/// The C-level static `font_cache` in `dpx-pdffont.c` is not cleaned up
-/// on compilation failure, causing subsequent calls to abort.
-///
-/// By spawning a subprocess, each compilation gets a fresh process with
-/// clean global state, and cleanup happens automatically on process exit.
-fn compile_with_tectonic_subprocess(work_dir: &Path, main_file: &str) -> Result<(), String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("Failed to get current executable path: {}", e))?;
-
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.args(["--tectonic-compile", &work_dir.to_string_lossy(), main_file])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to spawn tectonic subprocess: {}", e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
-}
-
-// --- TeXLive Compilation ---
-
-/// Build a PATH that includes the TeXLive bin directory so that xelatex
-/// can find xdvipdfmx, kpsewhich, and other tools it invokes internally.
-/// GUI apps on macOS have a minimal PATH that doesn't include TeXLive.
-fn texlive_env_path(engine: &Path) -> String {
-    let texbin = engine
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    if current_path.contains(&texbin) {
-        current_path
-    } else {
-        #[cfg(target_os = "windows")]
-        {
-            format!("{};{}", texbin, current_path)
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            format!("{}:{}", texbin, current_path)
-        }
-    }
-}
-
-/// Run a single TeX engine pass.  Never returns `Err` for a non-zero exit
-/// code — TeXLive returns non-zero for warnings, font substitutions, etc.
-/// The only `Err` is when the process cannot be *spawned* at all.
-/// The caller decides success by checking whether the PDF was produced.
-fn run_texlive_pass(
-    engine: &Path,
-    args: &[&str],
-    main_file: &Path,
-    work_dir: &Path,
-) -> Result<(), String> {
-    let mut cmd = std::process::Command::new(engine);
-    cmd.args(args)
-        .arg(main_file)
-        .current_dir(work_dir)
-        .env("PATH", texlive_env_path(engine))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to launch {}: {}", engine.display(), e))?;
-
-    // TeXLive returns non-zero on warnings too — don't fail here.
-    // The caller decides success by checking whether the PDF was produced.
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.trim().is_empty() {
-            eprintln!("[texlive] engine stderr: {}", stderr.trim());
-        }
-    }
-    Ok(())
-}
-
-fn compile_with_texlive(
-    work_dir: &Path,
+/// This is everything `compile_latex` does apart from the app's state, so
+/// tests (and a driver) call it directly. A compile that could not run is a
+/// report with one error, never an `Err`.
+pub(crate) fn compile_project(
+    project_dir: &Path,
     main_file: &str,
-    engine: Option<TexEngine>,
-    tex_content: &str,
-) -> Result<(), String> {
-    let engine_name = match engine {
-        Some(TexEngine::XeLaTeX) | None => "xelatex",
-        Some(TexEngine::Latex) => "pdflatex",
-        Some(TexEngine::LuaLaTeX) => "lualatex",
+    choice: EngineChoice,
+) -> CompileOutcome {
+    let failed = |message: String| CompileOutcome {
+        report: CompileReport::failed(project_dir, main_file, message),
+        pdf: None,
+        build: None,
     };
 
-    let engine_path = find_texlive_binary(engine_name)?;
-    let env_path = texlive_env_path(&engine_path);
-    eprintln!(
-        "[texlive] backend: {} ({})",
-        engine_name,
-        engine_path.display()
-    );
-    let bib_tool = detect_bib_tool(tex_content);
-
-    // Use "." as output-directory since current_dir is already work_dir.
-    // Absolute paths break when they contain ~ (e.g. iCloud's com~apple~CloudDocs)
-    // because TeX interprets ~ as a home directory shortcut.
-    let output_dir_arg = "-output-directory=.".to_string();
-    // Do NOT use -halt-on-error: xelatex is a pipeline (xetex → .xdv → xdvipdfmx → .pdf).
-    // With -halt-on-error, recoverable warnings (e.g. missing font shapes) cause xetex to
-    // exit non-zero, and the xelatex wrapper skips the xdvipdfmx step — producing .xdv but
-    // no .pdf.  -interaction=nonstopmode alone is sufficient to avoid interactive prompts.
-    let common_args: Vec<&str> = vec!["-synctex=1", "-interaction=nonstopmode", &output_dir_arg];
-
-    let main_file_path = Path::new(main_file);
-
-    // Pass 1
-    run_texlive_pass(&engine_path, &common_args, main_file_path, work_dir)?;
-
-    // Bib pass (if needed)
-    let main_stem = Path::new(main_file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("document");
-
-    match bib_tool {
-        BibTool::Biber => {
-            let biber_path = find_texlive_binary("biber")?;
-            let mut cmd = std::process::Command::new(&biber_path);
-            cmd.arg(main_stem)
-                .current_dir(work_dir)
-                .env("PATH", &env_path)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            #[cfg(target_os = "windows")]
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let output = cmd
-                .output()
-                .map_err(|e| format!("Failed to run biber: {}", e))?;
-            if !output.status.success() {
-                eprintln!(
-                    "[texlive] biber warning: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-        }
-        BibTool::BibTeX => {
-            let bibtex_path = find_texlive_binary("bibtex")?;
-            let aux_file = work_dir.join(format!("{}.aux", main_stem));
-            let mut cmd = std::process::Command::new(&bibtex_path);
-            cmd.arg(&aux_file)
-                .current_dir(work_dir)
-                .env("PATH", &env_path)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            #[cfg(target_os = "windows")]
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let output = cmd
-                .output()
-                .map_err(|e| format!("Failed to run bibtex: {}", e))?;
-            if !output.status.success() {
-                eprintln!(
-                    "[texlive] bibtex warning: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-        }
-        BibTool::None => {}
+    let work_dir = persistent_build_dir(&project_dir.to_string_lossy());
+    let synced = if work_dir.exists() {
+        sync_source_files(project_dir, &work_dir)
+            .map_err(|e| format!("Failed to sync project: {e}"))
+    } else {
+        std::fs::create_dir_all(&work_dir)
+            .and_then(|()| copy_dir_recursive(project_dir, &work_dir))
+            .map_err(|e| format!("Failed to copy project: {e}"))
+    };
+    if let Err(message) = synced {
+        return failed(message);
     }
 
-    // Pass 2: resolve references / TOC
-    run_texlive_pass(&engine_path, &common_args, &main_file_path, work_dir)?;
-
-    // Pass 3: stabilize citations (only if bib was used)
-    if !matches!(bib_tool, BibTool::None) {
-        run_texlive_pass(&engine_path, &common_args, &main_file_path, work_dir)?;
+    let main_path = work_dir.join(main_file);
+    if !main_path.is_file() {
+        return failed(format!(
+            "No .tex file found: \"{main_file}\". Create a document.tex or main.tex file to compile."
+        ));
+    }
+    let main_text = std::fs::read_to_string(&main_path).unwrap_or_default();
+    if choice == EngineChoice::Tectonic
+        && detect_tex_engine(&main_text) == Some(TexEngine::LuaLaTeX)
+    {
+        return failed(
+            "This document asks for LuaLaTeX (% !TEX program = lualatex), which Tectonic \
+             cannot run. Choose Auto or TeX Live in the engine menu."
+                .to_string(),
+        );
     }
 
-    let pdf_path = work_dir.join(format!("{}.pdf", main_stem));
-    let xdv_path = work_dir.join(format!("{}.xdv", main_stem));
+    let options = CompileOptions {
+        main: Some(main_file.replace('\\', "/")),
+        engine: choice.engine(),
+    };
+    let result = match thelab_core::compile::compile(&work_dir, &options) {
+        Ok(result) => result,
+        Err(error) => return failed(error.to_string()),
+    };
 
-    // Fallback: if xelatex produced .xdv but no .pdf (e.g. xdvipdfmx was skipped due to
-    // warnings), manually run xdvipdfmx to convert .xdv → .pdf.
-    if !pdf_path.exists() && xdv_path.exists() {
-        eprintln!("[texlive] .xdv exists but no .pdf — running xdvipdfmx manually");
-        if let Ok(xdvipdfmx) = find_texlive_binary("xdvipdfmx") {
-            let mut cmd = std::process::Command::new(&xdvipdfmx);
-            cmd.args(["-o", &pdf_path.to_string_lossy()])
-                .arg(&xdv_path)
-                .current_dir(work_dir)
-                .env("PATH", &env_path)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            #[cfg(target_os = "windows")]
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let output = cmd
-                .output()
-                .map_err(|e| format!("Failed to launch xdvipdfmx: {}", e))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.trim().is_empty() {
-                    eprintln!("[texlive] xdvipdfmx stderr: {}", stderr.trim());
-                }
-            }
+    // thelab resolves the copy to its real path; SyncTeX inputs use that.
+    let root = PathBuf::from(&result.root);
+    let main_dir = Path::new(&result.main)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let build = BuildInfo {
+        engine_dir: match result.engine {
+            // latexmk runs in the main file's folder, Tectonic in the root.
+            Engine::Latexmk => root.join(&main_dir),
+            Engine::Tectonic => root.clone(),
+        },
+        work_dir: root,
+        main_file_name: Path::new(&result.main)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("main")
+            .to_string(),
+    };
+
+    let pdf_path = result.pdf_path.clone();
+    let mut report = CompileReport::from_result(project_dir, main_file, result);
+    let pdf = match pdf_path.map(std::fs::read) {
+        Some(Ok(bytes)) => Some(bytes),
+        Some(Err(e)) => {
+            report.has_pdf = false;
+            report.ok = false;
+            report
+                .errors
+                .push(CompileProblem::error(format!("Failed to read PDF: {e}")));
+            None
         }
+        None => None,
+    };
+    CompileOutcome {
+        report,
+        pdf,
+        build: Some(build),
     }
-
-    // Success is determined by whether the PDF exists, not by exit codes.
-    // The caller (compile_latex) checks pdf_path.exists() and reads the log for errors.
-    Ok(())
 }
 
 // --- SyncTeX Native Parser ---
@@ -806,7 +790,7 @@ pub async fn compile_latex(
     state: tauri::State<'_, LatexCompilerState>,
     project_dir: String,
     main_file: String,
-    use_texlive: Option<bool>,
+    engine: Option<String>,
 ) -> Result<tauri::ipc::Response, String> {
     // Acquire semaphore permit (non-blocking)
     let _permit = state
@@ -825,208 +809,60 @@ pub async fn compile_latex(
     };
     let _project_guard = project_lock.lock().await;
 
+    let choice = EngineChoice::parse(engine.as_deref())?;
     let t0 = std::time::Instant::now();
-    let use_texlive = use_texlive.unwrap_or(false);
 
-    let main_file_name = Path::new(&main_file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("document")
-        .to_string();
-
-    // Set up build directory (offload blocking I/O to avoid starving the async runtime)
-    let work_dir = persistent_build_dir(&project_dir);
-    let is_reuse = work_dir.exists();
-
-    {
-        let work_dir = work_dir.clone();
+    // thelab runs the engine as a child process and waits for it: blocking.
+    let outcome = {
         let project_dir = project_dir.clone();
+        let main_file = main_file.clone();
         tokio::task::spawn_blocking(move || {
-            if is_reuse {
-                sync_source_files(Path::new(&project_dir), &work_dir)
-                    .map_err(|e| format!("Failed to sync project: {}", e))
-            } else {
-                std::fs::create_dir_all(&work_dir)
-                    .map_err(|e| format!("Failed to create build dir: {}", e))?;
-                copy_dir_recursive(Path::new(&project_dir), &work_dir)
-                    .map_err(|e| format!("Failed to copy project: {}", e))
-            }
+            lower_thread_priority();
+            compile_project(Path::new(&project_dir), &main_file, choice)
         })
         .await
-        .map_err(|e| format!("File sync task panicked: {}", e))??;
-    }
+        .map_err(|e| format!("Compilation task panicked: {}", e))?
+    };
 
+    let CompileOutcome { report, pdf, build } = outcome;
     eprintln!(
-        "[latex] +{:.0}ms {} ({}, backend={})",
+        "[latex] +{:.0}ms {} (choice={:?}, engine={}, ok={}, errors={}, warnings={}, pdf={})",
         t0.elapsed().as_millis(),
-        if is_reuse {
-            "sync source files"
-        } else {
-            "full copy"
-        },
-        if is_reuse { "reuse" } else { "first build" },
-        if use_texlive { "texlive" } else { "tectonic" }
+        main_file,
+        choice,
+        report.engine.unwrap_or("none"),
+        report.ok,
+        report.errors.len(),
+        report.warnings.len(),
+        pdf.as_ref().map_or(0, Vec::len) / 1024,
     );
 
-    // Remove stale PDF so a failed compile doesn't return the previous result.
-    let pdf_path = work_dir.join(format!("{}.pdf", main_file_name));
-    let _ = std::fs::remove_file(&pdf_path);
-
-    // Verify the main TeX file exists before attempting compilation
-    let main_tex_path = work_dir.join(&main_file);
-    if !main_tex_path.exists() {
-        return Err(format!(
-            "Compilation failed\n\nNo .tex file found: \"{}\". Create a document.tex or main.tex file to compile.",
-            main_file
-        ));
-    }
-
-    // Detect TeX engine from magic comment
-    let main_tex_content = std::fs::read_to_string(&main_tex_path).unwrap_or_default();
-    let engine = detect_tex_engine(&main_tex_content);
-
-    // Save engine name before `engine` is moved into the spawn_blocking closure
-    let engine_name_for_label = match &engine {
-        Some(TexEngine::XeLaTeX) | None => "xelatex",
-        Some(TexEngine::Latex) => "pdflatex",
-        Some(TexEngine::LuaLaTeX) => "lualatex",
-    };
-    let backend_label = if use_texlive {
-        format!("TeXLive/{}", engine_name_for_label)
-    } else {
-        "Tectonic".to_string()
-    };
-
-    if !use_texlive {
-        if let Some(TexEngine::LuaLaTeX) = engine {
-            return Err(
-                "Compilation failed\n\nThis document requires LuaLaTeX (% !TEX program = lualatex), \
-                 which is not supported. Prism uses a XeTeX-based engine (Tectonic). \
-                 Please switch to XeLaTeX or remove the magic comment."
-                    .to_string(),
-            );
-        }
-    }
-
-    let compile_result = if use_texlive {
-        let work_dir_clone = work_dir.clone();
-        let main_file_clone = main_file.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            lower_thread_priority();
-            compile_with_texlive(&work_dir_clone, &main_file_clone, engine, &main_tex_content)
-        })
-        .await
-        .map_err(|e| format!("Compilation task panicked: {}", e))?;
-        eprintln!(
-            "[latex] +{:.0}ms texlive done (ok={})",
-            t0.elapsed().as_millis(),
-            result.is_ok()
-        );
-        result
-    } else {
-        // Run Tectonic in a subprocess to isolate C-level global state (font cache, etc.).
-        let work_dir_clone = work_dir.clone();
-        let main_file_clone = main_file.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            lower_thread_priority();
-            compile_with_tectonic_subprocess(&work_dir_clone, &main_file_clone)
-        })
-        .await
-        .map_err(|e| format!("Compilation task panicked: {}", e))?;
-        eprintln!(
-            "[latex] +{:.0}ms tectonic done (ok={})",
-            t0.elapsed().as_millis(),
-            result.is_ok()
-        );
-        result
-    };
-
-    let log_path = work_dir.join(format!("{}.log", main_file_name));
-
-    // Handle "No pages of output" — retry with \AtEndDocument{\null} injection (Tectonic only).
-    // TeXLive multi-pass handles this differently; the injection is Tectonic-specific.
-    if !use_texlive && !pdf_path.exists() {
-        let log_path_clone = log_path.clone();
-        let main_tex = work_dir.join(&main_file);
-        let pdf_path_clone = pdf_path.clone();
-        let main_file_clone = main_file.clone();
-        let work_dir_clone = work_dir.clone();
-
-        let needs_retry = tokio::task::spawn_blocking(move || {
-            let log_content = std::fs::read_to_string(&log_path_clone).unwrap_or_default();
-            if !log_content.contains("No pages of output") || has_real_errors(&log_content) {
-                return Ok(false);
-            }
-            eprintln!("[latex] no pages of output — retrying with \\null injection");
-            if let Ok(content) = std::fs::read_to_string(&main_tex) {
-                if let Some(pos) = content.find("\\begin{document}") {
-                    let modified = format!(
-                        "{}\\AtEndDocument{{\\null}}{}",
-                        &content[..pos],
-                        &content[pos..]
-                    );
-                    let _ = std::fs::write(&main_tex, &modified);
-                    return Ok(true);
-                }
-            }
-            Ok::<bool, String>(false)
-        })
-        .await
-        .map_err(|e| format!("Retry prep panicked: {}", e))??;
-
-        if needs_retry {
-            let retry_result = tokio::task::spawn_blocking(move || {
-                compile_with_tectonic_subprocess(&work_dir_clone, &main_file_clone)
-            })
+    if let Some(build) = build {
+        state
+            .last_builds
+            .lock()
             .await
-            .map_err(|e| format!("Retry task panicked: {}", e))?;
-            eprintln!(
-                "[latex] empty-body retry: ok={} pdf_exists={}",
-                retry_result.is_ok(),
-                pdf_path_clone.exists()
-            );
-        }
+            .insert(project_dir.clone(), build);
     }
+    let failure = pdf.is_none().then(|| report.failure_message());
+    state.last_reports.lock().await.insert(project_dir, report);
 
-    // Store build info
-    {
-        let mut builds = state.last_builds.lock().await;
-        builds.insert(
-            project_dir.clone(),
-            BuildInfo {
-                work_dir: work_dir.clone(),
-                main_file_name: main_file_name.clone(),
-            },
-        );
+    // A PDF is shown even when the run also reported errors (as before);
+    // the errors reach the problems panel through the report.
+    match (pdf, failure) {
+        (Some(bytes), _) => Ok(tauri::ipc::Response::new(bytes)),
+        (None, failure) => Err(failure.unwrap_or_else(|| "Compilation failed".to_string())),
     }
+}
 
-    if pdf_path.exists() {
-        let pdf_path_clone = pdf_path.clone();
-        let pdf_bytes = tokio::task::spawn_blocking(move || std::fs::read(&pdf_path_clone))
-            .await
-            .map_err(|e| format!("PDF read task panicked: {}", e))?
-            .map_err(|e| format!("Failed to read PDF: {}", e))?;
-        eprintln!(
-            "[latex] +{:.0}ms total (reuse={}, backend={}) pdf_size={}KB",
-            t0.elapsed().as_millis(),
-            is_reuse,
-            backend_label,
-            pdf_bytes.len() / 1024
-        );
-        Ok(tauri::ipc::Response::new(pdf_bytes))
-    } else {
-        let log_content = std::fs::read_to_string(&log_path).unwrap_or_default();
-        let details = extract_error_lines(&log_content);
-        let msg = if details.is_empty() {
-            match compile_result {
-                Err(e) => e,
-                Ok(_) => "Compilation failed: no PDF generated".to_string(),
-            }
-        } else {
-            details
-        };
-        Err(format!("Compilation failed ({})\n\n{}", backend_label, msg))
-    }
+/// The report of the last compile of a project in this session: its
+/// errors and warnings by file and line, and the engine that ran.
+#[tauri::command]
+pub async fn latex_compile_report(
+    state: tauri::State<'_, LatexCompilerState>,
+    project_dir: String,
+) -> Result<Option<CompileReport>, String> {
+    Ok(state.last_reports.lock().await.get(&project_dir).cloned())
 }
 
 #[tauri::command]
@@ -1042,18 +878,17 @@ pub async fn synctex_edit(
         .get(&project_dir)
         .ok_or("No build found for this project")?;
 
-    let synctex_gz = build
-        .work_dir
-        .join(format!("{}.synctex.gz", build.main_file_name));
-    let synctex_plain = build
-        .work_dir
-        .join(format!("{}.synctex", build.main_file_name));
+    // thelab writes the SyncTeX data next to the PDF, in the copy's build/.
+    let output_dir = build.work_dir.join(BUILD_DIRECTORY);
+    let synctex_gz = output_dir.join(format!("{}.synctex.gz", build.main_file_name));
+    let synctex_plain = output_dir.join(format!("{}.synctex", build.main_file_name));
 
     let work_dir = build.work_dir.clone();
+    let engine_dir = build.engine_dir.clone();
     drop(builds); // Release lock before I/O
 
     // Read, decompress, and parse synctex data (blocking I/O + CPU work → offload)
-    let (mut file, line, column) = tokio::task::spawn_blocking(move || {
+    let (file, line, column) = tokio::task::spawn_blocking(move || {
         let synctex_data = if synctex_gz.exists() {
             let compressed = std::fs::read(&synctex_gz)
                 .map_err(|e| format!("Failed to read synctex.gz: {}", e))?;
@@ -1076,19 +911,7 @@ pub async fn synctex_edit(
     .await
     .map_err(|e| format!("Synctex task panicked: {}", e))??;
 
-    // Normalize: strip work_dir prefix and "./" or ".\\" prefix
-    let work_dir_str = work_dir.to_string_lossy().to_string();
-    if let Some(rest) = file.strip_prefix(&format!("{}/", work_dir_str)) {
-        file = rest.to_string();
-    } else if let Some(rest) = file.strip_prefix(&format!("{}\\", work_dir_str)) {
-        file = rest.to_string();
-    }
-    if let Some(rest) = file.strip_prefix("./") {
-        file = rest.to_string();
-    } else if let Some(rest) = file.strip_prefix(".\\") {
-        file = rest.to_string();
-    }
-
+    let file = project_relative(&file, &work_dir, &engine_dir);
     Ok(SynctexResult { file, line, column })
 }
 
@@ -1097,102 +920,12 @@ pub async fn synctex_edit(
 pub async fn cleanup_all_builds(state: &LatexCompilerState) {
     let mut builds = state.last_builds.lock().await;
     builds.clear();
+    state.last_reports.lock().await.clear();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- detect_bib_tool ---
-
-    #[test]
-    fn test_detect_bib_tool_biber() {
-        let content =
-            "\\documentclass{article}\n\\usepackage{biblatex}\n\\begin{document}\n\\end{document}";
-        assert_eq!(detect_bib_tool(content), BibTool::Biber);
-    }
-
-    #[test]
-    fn test_detect_bib_tool_biblatex_with_options() {
-        let content = "\\documentclass{article}\n\\usepackage[style=apa,backend=biber]{biblatex}\n\\begin{document}";
-        assert_eq!(detect_bib_tool(content), BibTool::Biber);
-    }
-
-    #[test]
-    fn test_detect_bib_tool_bibtex() {
-        let content = "\\documentclass{article}\n\\bibliography{refs}\n\\end{document}";
-        assert_eq!(detect_bib_tool(content), BibTool::BibTeX);
-    }
-
-    #[test]
-    fn test_detect_bib_tool_addbibresource() {
-        let content = "\\documentclass{article}\n\\addbibresource{refs.bib}\n\\end{document}";
-        assert_eq!(detect_bib_tool(content), BibTool::BibTeX);
-    }
-
-    #[test]
-    fn test_detect_bib_tool_none() {
-        let content = "\\documentclass{article}\n\\begin{document}\nHello\n\\end{document}";
-        assert_eq!(detect_bib_tool(content), BibTool::None);
-    }
-
-    #[test]
-    fn test_detect_bib_tool_commented_out() {
-        let content = "\\documentclass{article}\n% \\bibliography{refs}\n% \\usepackage{biblatex}\n\\end{document}";
-        assert_eq!(detect_bib_tool(content), BibTool::None);
-    }
-
-    // --- extract_error_lines ---
-
-    #[test]
-    fn test_extract_error_lines_empty_log() {
-        assert_eq!(extract_error_lines(""), "");
-    }
-
-    #[test]
-    fn test_extract_error_lines_no_pages() {
-        let log = "Some preamble\nNo pages of output.\nSome trailing";
-        let result = extract_error_lines(log);
-        assert_eq!(
-            result,
-            "No pages of output. Add visible content to the document body."
-        );
-    }
-
-    #[test]
-    fn test_extract_error_lines_with_errors() {
-        let log = "line 1\n! Undefined control sequence.\nline 3\n! Missing $ inserted.\nline 5";
-        let result = extract_error_lines(log);
-        assert!(result.contains("Undefined control sequence"));
-        assert!(result.contains("Missing $ inserted"));
-    }
-
-    #[test]
-    fn test_extract_error_lines_error_colon() {
-        let log = "stuff\nLatex Error: Bad math environment\nmore stuff";
-        let result = extract_error_lines(log);
-        assert!(result.contains("Error:"));
-    }
-
-    #[test]
-    fn test_extract_error_lines_no_errors_returns_tail() {
-        let log = "a".repeat(1000);
-        let result = extract_error_lines(&log);
-        // Should return last 500 chars
-        assert_eq!(result.len(), 500);
-    }
-
-    #[test]
-    fn test_extract_error_lines_limits_to_10() {
-        let mut log = String::new();
-        for i in 0..20 {
-            log.push_str(&format!("! Error number {}\n", i));
-        }
-        let result = extract_error_lines(&log);
-        assert!(result.contains("---- Engine output ----"));
-        let count = result.lines().count();
-        assert!(count <= 120);
-    }
 
     // --- persistent_build_dir ---
 
@@ -1315,24 +1048,6 @@ Postamble:
         assert!(result.is_none());
     }
 
-    // --- extract_error_lines additional edge cases ---
-
-    #[test]
-    fn test_extract_error_lines_mixed_error_formats() {
-        let log = "preamble\n! LaTeX Error: File not found.\nl.42 \\input{missing}\nerror: compilation stopped";
-        let result = extract_error_lines(log);
-        assert!(result.contains("LaTeX Error"));
-        assert!(result.contains("error: compilation stopped"));
-    }
-
-    #[test]
-    fn test_extract_error_lines_short_log_no_errors() {
-        let log = "This is a short log without errors";
-        let result = extract_error_lines(log);
-        // Short log (< 500 chars) returned as tail
-        assert_eq!(result, log);
-    }
-
     // --- parse_synctex_node additional edge cases ---
 
     #[test]
@@ -1406,40 +1121,6 @@ Postamble:
         assert!(result.is_some());
         let (_, line, _) = result.unwrap();
         assert_eq!(line, 25);
-    }
-
-    // --- extract_error_lines: real errors take priority over "No pages of output" ---
-
-    #[test]
-    fn test_extract_error_lines_real_errors_over_no_pages() {
-        let log = "Some preamble\n! LaTeX Error: File `missing.sty' not found.\nNo pages of output.\nMore stuff";
-        let result = extract_error_lines(log);
-        assert!(
-            result.contains("LaTeX Error"),
-            "real error should be shown, got: {}",
-            result
-        );
-        assert!(
-            !result.contains("Add visible content"),
-            "No pages fallback should NOT appear"
-        );
-    }
-
-    // --- has_real_errors ---
-
-    #[test]
-    fn test_has_real_errors_with_bang() {
-        assert!(has_real_errors("ok\n! Undefined control sequence.\nmore"));
-    }
-
-    #[test]
-    fn test_has_real_errors_with_error_colon() {
-        assert!(has_real_errors("LaTeX Error: Bad math\nstuff"));
-    }
-
-    #[test]
-    fn test_has_real_errors_none() {
-        assert!(!has_real_errors("This is pdfTeX\nNo pages of output.\n"));
     }
 
     // --- detect_tex_engine ---
@@ -1659,35 +1340,230 @@ Postamble:
         );
     }
 
-    // --- persistent_build_dir ---
+    // --- the project's own build/ stays out of the copy ---
 
     #[test]
-    fn test_stale_pdf_removal_pattern() {
-        // Simulates the pattern used in compile_latex: remove stale PDF
-        // before compilation so a failed compile doesn't return old results.
-        let build_dir = tempfile::tempdir().unwrap();
-        let pdf_path = build_dir.path().join("document.pdf");
+    fn test_copy_dir_recursive_skips_the_projects_build_folder() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
 
-        // Simulate previous successful build left a PDF
-        std::fs::write(&pdf_path, "old pdf data").unwrap();
-        assert!(pdf_path.exists());
+        std::fs::create_dir_all(src.path().join("build")).unwrap();
+        std::fs::write(src.path().join("build").join("main.pdf"), "cli pdf").unwrap();
+        std::fs::create_dir_all(src.path().join("figures").join("build")).unwrap();
+        std::fs::write(src.path().join("figures").join("build").join("a.tex"), "a").unwrap();
+        std::fs::write(src.path().join("main.tex"), "doc").unwrap();
 
-        // This is what compile_latex does before running tectonic
-        let _ = std::fs::remove_file(&pdf_path);
-        assert!(!pdf_path.exists());
+        copy_dir_recursive(src.path(), dst.path()).unwrap();
 
-        // If compilation fails, pdf_path.exists() is false → error returned
+        assert!(dst.path().join("main.tex").exists());
+        assert!(!dst.path().join("build").exists());
+        // Only the top-level build/ is thelab's; a deeper one is the user's.
+        assert!(dst
+            .path()
+            .join("figures")
+            .join("build")
+            .join("a.tex")
+            .exists());
     }
 
     #[test]
-    fn test_stale_pdf_removal_no_existing_file() {
-        // remove_file on a non-existent path should not panic (we use let _ =)
-        let build_dir = tempfile::tempdir().unwrap();
-        let pdf_path = build_dir.path().join("document.pdf");
+    fn test_sync_source_files_skips_the_projects_build_folder() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
 
-        assert!(!pdf_path.exists());
-        let result = std::fs::remove_file(&pdf_path);
-        // It's an error but we ignore it with let _ =
-        assert!(result.is_err());
+        std::fs::create_dir_all(src.path().join("build")).unwrap();
+        std::fs::write(src.path().join("build").join("main.pdf"), "cli pdf").unwrap();
+        std::fs::write(src.path().join("main.tex"), "doc").unwrap();
+
+        sync_source_files(src.path(), dst.path()).unwrap();
+
+        assert!(dst.path().join("main.tex").exists());
+        assert!(!dst.path().join("build").exists());
+    }
+
+    // --- engine menu ---
+
+    #[test]
+    fn test_engine_choice_maps_the_menu_onto_thelab() {
+        assert_eq!(EngineChoice::parse(None), Ok(EngineChoice::Auto));
+        assert_eq!(EngineChoice::parse(Some("auto")), Ok(EngineChoice::Auto));
+        assert_eq!(
+            EngineChoice::parse(Some("tectonic")),
+            Ok(EngineChoice::Tectonic)
+        );
+        assert_eq!(
+            EngineChoice::parse(Some("texlive")),
+            Ok(EngineChoice::TexLive)
+        );
+        assert!(EngineChoice::parse(Some("lualatex")).is_err());
+
+        assert_eq!(EngineChoice::Auto.engine(), None);
+        assert_eq!(EngineChoice::Tectonic.engine(), Some(Engine::Tectonic));
+        assert_eq!(EngineChoice::TexLive.engine(), Some(Engine::Latexmk));
+    }
+
+    // --- SyncTeX inputs ---
+
+    #[test]
+    fn test_project_relative_strips_the_copy() {
+        let work = Path::new("/p/.prism/build");
+        // pdfTeX writes absolute paths with a `./` in them.
+        assert_eq!(
+            project_relative("/p/.prism/build/./chapters/one.tex", work, work),
+            "chapters/one.tex"
+        );
+        // latexmk runs in the main file's folder; relative inputs start there.
+        assert_eq!(
+            project_relative("./intro.tex", work, &work.join("paper")),
+            "paper/intro.tex"
+        );
+        assert_eq!(
+            project_relative("../shared/defs.tex", work, &work.join("paper")),
+            "shared/defs.tex"
+        );
+        // A file of the TeX installation stays as it was written.
+        assert_eq!(
+            project_relative("/usr/local/texlive/article.cls", work, work),
+            "/usr/local/texlive/article.cls"
+        );
+    }
+
+    // --- reports ---
+
+    #[test]
+    fn test_failure_message_lists_one_error_per_line() {
+        let report = CompileReport {
+            project_dir: "/p".to_string(),
+            main_file: "main.tex".to_string(),
+            engine: Some("latexmk"),
+            ok: false,
+            has_pdf: false,
+            duration_ms: 1,
+            errors: vec![
+                CompileProblem {
+                    severity: "error",
+                    file: Some("refs.bib".to_string()),
+                    line: Some(4),
+                    message: "syntax error:\n  found end of entry".to_string(),
+                },
+                CompileProblem::error("biber failed"),
+            ],
+            warnings: Vec::new(),
+        };
+        assert_eq!(
+            report.failure_message(),
+            "Compilation failed (latexmk)\n\nrefs.bib:4: syntax error: found end of entry\nbiber failed"
+        );
+    }
+
+    #[test]
+    fn test_compile_project_without_the_main_file_reports_it() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("notes.txt"), "no tex here").unwrap();
+
+        let outcome = compile_project(project.path(), "main.tex", EngineChoice::Auto);
+
+        assert!(outcome.pdf.is_none());
+        assert!(!outcome.report.ok);
+        assert_eq!(outcome.report.engine, None);
+        assert!(outcome.report.errors[0]
+            .message
+            .contains("No .tex file found"));
+    }
+
+    // --- compiling through thelab-core (needs latexmk and biber) ---
+
+    fn have(program: &str) -> bool {
+        thelab_core::tools::find_program(program).is_some()
+    }
+
+    const BIBLATEX_MAIN: &str = "\\documentclass{article}
+\\usepackage{biblatex}
+\\addbibresource{refs.bib}
+\\begin{document}
+As \\textcite{knuth1984} shows.
+\\printbibliography
+\\end{document}
+";
+
+    const KNUTH: &str = "@book{knuth1984,
+  author = {Knuth, Donald E.},
+  title = {The {\\TeX}book},
+  publisher = {Addison-Wesley},
+  year = {1984}
+}
+";
+
+    #[test]
+    fn test_a_biber_document_compiles_with_latexmk_and_a_broken_bib_is_located() {
+        if !have("latexmk") || !have("biber") {
+            eprintln!("skipped: latexmk or biber is not installed");
+            return;
+        }
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("main.tex"), BIBLATEX_MAIN).unwrap();
+        std::fs::write(project.path().join("refs.bib"), KNUTH).unwrap();
+
+        let outcome = compile_project(project.path(), "main.tex", EngineChoice::Auto);
+        let report = &outcome.report;
+        assert_eq!(report.engine, Some("latexmk"), "{report:#?}");
+        assert!(report.ok, "{report:#?}");
+        assert!(outcome
+            .pdf
+            .as_ref()
+            .is_some_and(|pdf| pdf.starts_with(b"%PDF")));
+        // The engine ran on the copy, which the project does not see.
+        assert!(project.path().join(".prism/build/build/main.pdf").is_file());
+        assert!(!project.path().join("build").exists());
+
+        // An entry left open: biber's own message, at its file and line.
+        let broken =
+            format!("{KNUTH}\n@article{{broken2026,\n  title = {{Unclosed,\n  year = 2026\n");
+        std::fs::write(project.path().join("refs.bib"), broken).unwrap();
+        let outcome = compile_project(project.path(), "main.tex", EngineChoice::Auto);
+        let report = &outcome.report;
+        assert!(!report.ok, "{report:#?}");
+        let located = report
+            .errors
+            .iter()
+            .find(|e| e.file.as_deref() == Some("refs.bib"))
+            .unwrap_or_else(|| panic!("no error in refs.bib: {report:#?}"));
+        assert!(located.line.is_some(), "{located:#?}");
+    }
+
+    /// Compiles the project folder named by `THELAB_COMPILE_PROJECT` through
+    /// `compile_project`, exactly as the app does, and prints the report:
+    ///
+    /// THELAB_COMPILE_PROJECT=<a copy of a project> cargo test --manifest-path
+    /// apps/desktop/src-tauri/Cargo.toml compile_a_named_project -- --ignored --nocapture
+    ///
+    /// `THELAB_COMPILE_MAIN` names the main file (default main.tex) and
+    /// `THELAB_COMPILE_ENGINE` the menu choice (default auto). With
+    /// `THELAB_EXPECT_BIB_ERROR` set it expects an error located in a .bib
+    /// file; otherwise a clean compile with a PDF.
+    #[test]
+    #[ignore]
+    fn compile_a_named_project() {
+        let Some(project) = std::env::var_os("THELAB_COMPILE_PROJECT") else {
+            panic!("set THELAB_COMPILE_PROJECT to a project folder (a copy: .prism/ is written)");
+        };
+        let main = std::env::var("THELAB_COMPILE_MAIN").unwrap_or_else(|_| "main.tex".into());
+        let choice =
+            EngineChoice::parse(std::env::var("THELAB_COMPILE_ENGINE").ok().as_deref()).unwrap();
+
+        let outcome = compile_project(Path::new(&project), &main, choice);
+        let report = &outcome.report;
+        println!("{}", serde_json::to_string_pretty(report).unwrap());
+
+        if std::env::var_os("THELAB_EXPECT_BIB_ERROR").is_some() {
+            let located = report.errors.iter().find(|e| {
+                e.file.as_deref().is_some_and(|f| f.ends_with(".bib")) && e.line.is_some()
+            });
+            assert!(located.is_some(), "no error located in a .bib file");
+            println!("located: {}", located.unwrap().describe());
+        } else {
+            assert!(report.ok, "the compile reported errors");
+            assert!(outcome.pdf.is_some(), "no PDF");
+        }
     }
 }
