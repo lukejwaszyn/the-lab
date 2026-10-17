@@ -93,6 +93,42 @@ impl PythonMap {
     }
 }
 
+impl PythonMap {
+    /// The interpreter that runs `file`, a path relative to the root with
+    /// `/`: the one of the longest configured folder that holds it, else the
+    /// default. The folder comes with it, `None` for the default. A folder
+    /// whose interpreter has a problem still claims its files, so that a
+    /// script never runs with a Python it was not meant for.
+    pub fn interpreter_for(&self, file: &str) -> (Option<&str>, &Interpreter) {
+        let file = file.trim_start_matches("./");
+        self.folders
+            .iter()
+            .filter(|entry| {
+                file.strip_prefix(entry.folder.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .max_by_key(|entry| entry.folder.len())
+            .map_or((None, &self.default), |entry| {
+                (Some(entry.folder.as_str()), &entry.interpreter)
+            })
+    }
+}
+
+/// The interpreters of the project at `root`, from its `thelab.toml` alone.
+/// Unlike `scan` it does not walk the project's files, so a project full of
+/// data answers as quickly as an empty one.
+pub fn python_map_at(root: &Path) -> crate::Result<PythonMap> {
+    let root = crate::scan::project_root(root)?;
+    let config = crate::scan::read_config(&root)?;
+    Ok(python_map(&Project {
+        root,
+        main: None,
+        tex_files: Vec::new(),
+        bib_files: Vec::new(),
+        config,
+    }))
+}
+
 /// The interpreters of a project, each checked by asking it for its version.
 pub fn python_map(project: &Project) -> PythonMap {
     python_map_with(project, find_program)
@@ -524,5 +560,80 @@ mod tests {
         project.write("thelab.toml", "[python]\ninterpreters = \"python3\"\n");
         let error = scan(&project.0, None).unwrap_err().to_string();
         assert!(error.contains("unknown field `interpreters`"), "{error}");
+    }
+
+    #[test]
+    fn a_file_uses_the_longest_folder_that_holds_it() {
+        let project = Scratch::new("for-file");
+        project.python("bin/py", "Python 3.14.0");
+        project.python("bin/sim", "Python 3.12.4");
+        project.python("bin/ml", "Python 3.13.1");
+        project.write("src/ml/train.py", "");
+        project.write("sim/run.py", "");
+        project.write(
+            "thelab.toml",
+            "[python]\ninterpreter = \"bin/py\"\n\n[python.folders]\n\
+             \"sim\" = \"bin/sim\"\n\"src/ml\" = \"bin/ml\"\n\"src\" = \"bin/py\"\n",
+        );
+        let map = project.map(nothing);
+
+        let version = |file: &str| {
+            let (folder, interpreter) = map.interpreter_for(file);
+            (folder, interpreter.version.as_deref())
+        };
+        assert_eq!(version("src/ml/train.py"), (Some("src/ml"), Some("3.13.1")));
+        assert_eq!(
+            version("src/ml/deep/net.py"),
+            (Some("src/ml"), Some("3.13.1"))
+        );
+        assert_eq!(version("src/processing.py"), (Some("src"), Some("3.14.0")));
+        assert_eq!(version("sim/run.py"), (Some("sim"), Some("3.12.4")));
+        assert_eq!(version("./sim/run.py"), (Some("sim"), Some("3.12.4")));
+        // A folder name is not a prefix of a longer one, and the root is the default.
+        assert_eq!(version("simulation/run.py"), (None, Some("3.14.0")));
+        assert_eq!(version("src_old/x.py"), (None, Some("3.14.0")));
+        assert_eq!(version("tools/build.py"), (None, Some("3.14.0")));
+        assert_eq!(version("run.py"), (None, Some("3.14.0")));
+    }
+
+    #[test]
+    fn a_folder_whose_interpreter_has_a_problem_still_claims_its_files() {
+        let project = Scratch::new("for-file-problem");
+        project.python("bin/py", "Python 3.14.0");
+        project.write(
+            "thelab.toml",
+            "[python]\ninterpreter = \"bin/py\"\n\n[python.folders]\n\
+             \"sim\" = \"bin/missing\"\n",
+        );
+        let map = project.map(nothing);
+
+        // Falling back to the default would run the script with the wrong Python.
+        let (folder, interpreter) = map.interpreter_for("sim/run.py");
+        assert_eq!(folder, Some("sim"));
+        assert!(interpreter.problem.is_some());
+    }
+
+    #[test]
+    fn the_map_can_be_read_without_scanning_the_project() {
+        let project = Scratch::new("at-root");
+        project.python("bin/py", "Python 3.14.0");
+        project.write("thelab.toml", "[python]\ninterpreter = \"bin/py\"\n");
+
+        let map = python_map_at(&project.0).unwrap();
+        assert_eq!(map.root, project.0.display().to_string());
+        assert_eq!(map.default.version.as_deref(), Some("3.14.0"));
+        assert_eq!(map, project.map(nothing));
+    }
+
+    #[test]
+    fn reading_the_map_reports_a_broken_config_and_a_missing_folder() {
+        let project = Scratch::new("at-root-bad");
+        project.write("thelab.toml", "[python]\ninterpreters = \"python3\"\n");
+        let error = python_map_at(&project.0).unwrap_err().to_string();
+        assert!(error.contains("unknown field `interpreters`"), "{error}");
+
+        let gone = project.0.join("no-such-folder");
+        let error = python_map_at(&gone).unwrap_err().to_string();
+        assert!(error.contains("Cannot open project folder"), "{error}");
     }
 }

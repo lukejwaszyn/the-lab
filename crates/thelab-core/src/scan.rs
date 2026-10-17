@@ -53,16 +53,7 @@ impl Project {
 /// Scans the project at `root`. `main_override` (relative to `root`) takes
 /// precedence over `thelab.toml` and detection.
 pub fn scan(root: &Path, main_override: Option<&str>) -> Result<Project> {
-    let root = fs::canonicalize(root).map_err(|e| {
-        Error::new(format!(
-            "Cannot open project folder {}: {e}",
-            root.display()
-        ))
-    })?;
-    if !root.is_dir() {
-        return Err(Error::new(format!("{} is not a folder", root.display())));
-    }
-
+    let root = project_root(root)?;
     let config = read_config(&root)?;
     let mut tex_files = Vec::new();
     let mut bib_files = Vec::new();
@@ -91,7 +82,21 @@ pub fn scan(root: &Path, main_override: Option<&str>) -> Result<Project> {
     })
 }
 
-fn read_config(root: &Path) -> Result<Config> {
+/// The project folder, made absolute with links resolved.
+pub(crate) fn project_root(root: &Path) -> Result<PathBuf> {
+    let root = fs::canonicalize(root).map_err(|e| {
+        Error::new(format!(
+            "Cannot open project folder {}: {e}",
+            root.display()
+        ))
+    })?;
+    if !root.is_dir() {
+        return Err(Error::new(format!("{} is not a folder", root.display())));
+    }
+    Ok(root)
+}
+
+pub(crate) fn read_config(root: &Path) -> Result<Config> {
     let path = root.join(CONFIG_FILE);
     match fs::read_to_string(&path) {
         Ok(text) => toml::from_str(&text)
