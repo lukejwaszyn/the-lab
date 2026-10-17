@@ -4,6 +4,7 @@ mod anthropic_proxy;
 mod claude;
 mod claude_control;
 mod claude_process;
+mod docx;
 mod history;
 mod latex;
 mod python_run;
@@ -659,6 +660,9 @@ pub fn run() {
             python_run::python_run_start,
             python_run::python_run_stop,
             python_run::python_run_close_project,
+            docx::account_full_name,
+            docx::docx_file_state,
+            docx::docx_save,
             get_system_info,
             open_debug_window,
         ])
