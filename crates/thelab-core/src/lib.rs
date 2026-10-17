@@ -11,6 +11,7 @@ pub mod outline;
 pub mod overview;
 pub mod python;
 pub mod render;
+pub mod run;
 pub mod scan;
 pub mod state;
 pub mod synctex;
