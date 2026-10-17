@@ -2002,8 +2002,15 @@ fn python_env(cwd: &Path) -> PythonEnv {
     if let Some(venv) = &interpreter.virtual_env {
         let venv = PathBuf::from(venv);
         // uv syncs the environment it is pointed at with this project's
-        // lock file, which suits only an environment of the project's own.
-        let own = cwd.canonicalize().is_ok_and(|root| venv.starts_with(root));
+        // lock file, which suits only an environment of the project's own:
+        // one inside the project folder, as named or once symlinks are
+        // resolved.
+        let own = cwd.canonicalize().is_ok_and(|root| {
+            venv.starts_with(&root)
+                || venv
+                    .canonicalize()
+                    .is_ok_and(|venv| venv.starts_with(&root))
+        });
         return activate_venv(&venv, own);
     }
     match interpreter
@@ -5369,6 +5376,29 @@ mod tests {
             .unwrap();
 
             assert_eq!(python_env(&root), activated(&venv, false));
+        }
+
+        #[test]
+        fn test_python_env_counts_a_venv_named_through_a_symlink_as_the_projects_own() {
+            // thelab.toml names the project's own venv by an absolute path
+            // that goes through a symlink to the project folder.
+            let (_dir, root) = python_project();
+            stand_in_python(&root.join("envs/sim/bin/python"), true);
+            let links = tempfile::tempdir().unwrap();
+            let link = links.path().canonicalize().unwrap().join("project-link");
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            let venv = link.join("envs/sim");
+            std::fs::write(
+                root.join("thelab.toml"),
+                format!(
+                    "[python]\ninterpreter = \"{}\"\n",
+                    venv.join("bin/python").display()
+                ),
+            )
+            .unwrap();
+
+            assert_eq!(python_env(&root), activated(&venv, true));
+            assert_eq!(python_env(&link), activated(&venv, true));
         }
 
         #[test]
