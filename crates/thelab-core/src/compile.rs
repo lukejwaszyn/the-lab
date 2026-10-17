@@ -272,12 +272,24 @@ pub fn compile(root: &Path, options: &CompileOptions) -> Result<CompileResult> {
     }
 
     if !succeeded && errors.is_empty() {
-        errors.push(Diagnostic {
-            severity: Severity::Error,
-            file: None,
-            line: None,
-            message: unexplained_failure(engine, &output, limit),
-        });
+        let diagnostic = if report.no_pages {
+            // Tectonic's own warning says the same thing less plainly.
+            warnings.retain(|warning| !warning.message.starts_with("did not produce \""));
+            Diagnostic {
+                severity: Severity::Error,
+                file: Some(main.clone()),
+                line: None,
+                message: NO_PAGES.to_string(),
+            }
+        } else {
+            Diagnostic {
+                severity: Severity::Error,
+                file: None,
+                line: None,
+                message: unexplained_failure(engine, &output, limit),
+            }
+        };
+        errors.push(diagnostic);
     }
 
     Ok(CompileResult {
@@ -309,6 +321,10 @@ pub fn pdf_path(project: &Project) -> Result<PathBuf> {
         .join(BUILD_DIRECTORY)
         .join(format!("{stem}.pdf")))
 }
+
+/// The error for a document that typeset nothing, which is what the Blank
+/// template and a new .tex file start as.
+pub const NO_PAGES: &str = "No pages of output. Add visible content to the document body.";
 
 /// A file's modification time and size: enough to notice a rewrite.
 type Stamp = (SystemTime, u64);

@@ -414,3 +414,30 @@ fn a_bibliography_biber_cannot_read_is_reported_at_its_line() {
         (Some("refs.bib"), Some(11))
     );
 }
+
+#[test]
+fn an_empty_document_says_it_has_no_pages() {
+    // The Blank template and every new .tex file start like this.
+    let no_pages = error(
+        "main.tex",
+        None,
+        "No pages of output. Add visible content to the document body.",
+    );
+    for engine in ENGINES {
+        if !have(engine.name()) {
+            continue;
+        }
+        let (dir, first) = build(&fixture_project("empty-body"), engine, None);
+        assert!(!first.ok, "{engine:?}");
+        assert_eq!(first.errors, [no_pages.clone()], "{engine:?}");
+        assert_eq!(first.warnings, [], "{engine:?}");
+        assert_eq!(first.pdf_path, None, "{engine:?}");
+
+        let options = CompileOptions {
+            main: None,
+            engine: Some(engine),
+        };
+        let second = compile(dir.path(), &options).unwrap();
+        assert_eq!(second.errors, [no_pages.clone()], "{engine:?}: again");
+    }
+}
