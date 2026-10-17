@@ -2,6 +2,7 @@
 
 mod anthropic_proxy;
 mod claude;
+mod claude_control;
 mod claude_process;
 mod history;
 mod latex;
@@ -615,6 +616,7 @@ pub fn run() {
             claude::resume_claude_code,
             claude::cancel_claude_execution,
             claude::interrupt_claude_execution,
+            claude::respond_claude_permission,
             claude::run_shell_command,
             claude::migrate_project_sessions,
             claude::get_claude_fast_mode,

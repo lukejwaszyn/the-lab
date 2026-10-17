@@ -1,7 +1,8 @@
 use crate::anthropic_proxy::{start_openai_anthropic_proxy, OpenAiProxyCredential};
 pub use crate::claude_process::{kill_process_for_window, ClaudeProcessState};
 use crate::claude_process::{
-    spawn_claude_process, stop_claude_process, ClaudeStopMode, SpawnProviderMetadata,
+    answer_claude_permission, spawn_claude_process, stop_claude_process, ClaudeStopMode,
+    SpawnProviderMetadata,
 };
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -1986,17 +1987,12 @@ fn clear_anthropic_provider_env(cmd: &mut Command) {
     }
 }
 
-fn with_prompt_transport(mut args: Vec<String>, prompt: String) -> (Vec<String>, Option<String>) {
+/// The Lab: on every platform the prompt goes to stdin as one stream-json
+/// line (`--input-format stream-json` is in `common_claude_args`), and stdin
+/// stays open so the app can answer Claude's permission requests.
+fn with_prompt_transport(mut args: Vec<String>, prompt: String) -> (Vec<String>, String) {
     args.push("-p".to_string());
-    #[cfg(target_os = "windows")]
-    {
-        (args, Some(prompt))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        args.push(prompt);
-        (args, None)
-    }
+    (args, crate::claude_control::user_message_line(&prompt))
 }
 
 // 鈹€鈹€鈹€ Setup / Status Commands 鈹€鈹€鈹€
@@ -2518,32 +2514,44 @@ pub async fn login_claude(window: WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// The appended system prompt.
+const THE_LAB_SYSTEM_PROMPT: &str = concat!(
+    "You are an AI assistant integrated into a LaTeX document editor (Prism). ",
+    "Follow these rules strictly:\n",
+    "1. PLANNING FIRST: Before making changes, use TodoWrite to create a step-by-step plan. ",
+    "Break large tasks into small, incremental steps (one section or one logical unit per step).\n",
+    "2. INCREMENTAL EDITS: Use the Edit tool to make small, targeted changes 鈥?one step at a time. ",
+    "NEVER write or rewrite an entire file at once. Always prefer editing existing content over replacing it wholesale.\n",
+    "3. STEP BY STEP: After each edit, mark the todo item as completed, then proceed to the next step. ",
+    "This lets the user review changes incrementally.\n",
+    "4. PRESERVE EXISTING CONTENT: Always read the file first. Keep the existing preamble, packages, ",
+    "and structure intact. Only add or modify what is needed for the current step.\n",
+    "5. LaTeX BEST PRACTICES: Use proper sectioning (\\chapter, \\section, \\subsection), ",
+    "citations (\\cite), cross-references (\\label, \\ref), and BibTeX for bibliographies.\n",
+    "6. SKILLS: If scientific skills are installed in .claude/skills/, follow their guidelines ",
+    "for domain-specific tasks. Use skill-provided LaTeX packages (.sty) and code patterns.\n",
+    "7. PYTHON: If a .venv/ exists in the project, it is already activated. ",
+    "Use `uv pip install` to add packages and `python` to run scripts."
+);
+
 /// Common CLI flags shared across all Claude invocations.
+///
+/// The Lab: Claude asks before it acts. Permission requests arrive on stdout as
+/// `control_request` lines and are answered on stdin (see `claude_control`),
+/// so `--dangerously-skip-permissions` is gone.
 fn common_claude_args() -> Vec<String> {
     vec![
+        "--input-format".to_string(),
+        "stream-json".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
-        "--dangerously-skip-permissions".to_string(),
+        "--permission-mode".to_string(),
+        "default".to_string(),
+        "--permission-prompt-tool".to_string(),
+        "stdio".to_string(),
         "--append-system-prompt".to_string(),
-        concat!(
-            "You are an AI assistant integrated into a LaTeX document editor (Prism). ",
-            "Follow these rules strictly:\n",
-            "1. PLANNING FIRST: Before making changes, use TodoWrite to create a step-by-step plan. ",
-            "Break large tasks into small, incremental steps (one section or one logical unit per step).\n",
-            "2. INCREMENTAL EDITS: Use the Edit tool to make small, targeted changes 鈥?one step at a time. ",
-            "NEVER write or rewrite an entire file at once. Always prefer editing existing content over replacing it wholesale.\n",
-            "3. STEP BY STEP: After each edit, mark the todo item as completed, then proceed to the next step. ",
-            "This lets the user review changes incrementally.\n",
-            "4. PRESERVE EXISTING CONTENT: Always read the file first. Keep the existing preamble, packages, ",
-            "and structure intact. Only add or modify what is needed for the current step.\n",
-            "5. LaTeX BEST PRACTICES: Use proper sectioning (\\chapter, \\section, \\subsection), ",
-            "citations (\\cite), cross-references (\\label, \\ref), and BibTeX for bibliographies.\n",
-            "6. SKILLS: If scientific skills are installed in .claude/skills/, follow their guidelines ",
-            "for domain-specific tasks. Use skill-provided LaTeX packages (.sty) and code patterns.\n",
-            "7. PYTHON: If a .venv/ exists in the project, it is already activated. ",
-            "Use `uv pip install` to add packages and `python` to run scripts."
-        ).to_string(),
+        THE_LAB_SYSTEM_PROMPT.to_string(),
     ]
 }
 
@@ -3182,6 +3190,22 @@ fn http_origin(value: &str) -> Option<String> {
     Some(value[..scheme_end + 3 + host_end].to_string())
 }
 
+/// The argument list and stdin line for a Claude Code run in a chat tab:
+/// `prefix` is empty, `-c`, or `--resume <id>`.
+fn claude_code_args(
+    prefix: Vec<String>,
+    model: Option<String>,
+    prompt: String,
+) -> (Vec<String>, String) {
+    let (mut args, stdin_payload) = with_prompt_transport(prefix, prompt);
+    if let Some(m) = model {
+        args.push("--model".to_string());
+        args.push(m);
+    }
+    args.extend(common_claude_args());
+    (args, stdin_payload)
+}
+
 #[tauri::command]
 pub async fn execute_claude_code(
     window: WebviewWindow,
@@ -3214,12 +3238,7 @@ pub async fn execute_claude_code(
 
     let claude_path = find_claude_binary()?;
 
-    let (mut args, stdin_payload) = with_prompt_transport(Vec::new(), prompt);
-    if let Some(m) = model {
-        args.push("--model".to_string());
-        args.push(m);
-    }
-    args.extend(common_claude_args());
+    let (args, stdin_payload) = claude_code_args(Vec::new(), model, prompt);
 
     let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
     spawn_claude_process(window, cmd, tab_id, stdin_payload, None).await
@@ -3257,12 +3276,7 @@ pub async fn continue_claude_code(
 
     let claude_path = find_claude_binary()?;
 
-    let (mut args, stdin_payload) = with_prompt_transport(vec!["-c".to_string()], prompt);
-    if let Some(m) = model {
-        args.push("--model".to_string());
-        args.push(m);
-    }
-    args.extend(common_claude_args());
+    let (args, stdin_payload) = claude_code_args(vec!["-c".to_string()], model, prompt);
 
     let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
     spawn_claude_process(window, cmd, tab_id, stdin_payload, None).await
@@ -3301,13 +3315,8 @@ pub async fn resume_claude_code(
 
     let claude_path = find_claude_binary()?;
 
-    let (mut args, stdin_payload) =
-        with_prompt_transport(vec!["--resume".to_string(), session_id], prompt);
-    if let Some(m) = model {
-        args.push("--model".to_string());
-        args.push(m);
-    }
-    args.extend(common_claude_args());
+    let (args, stdin_payload) =
+        claude_code_args(vec!["--resume".to_string(), session_id], model, prompt);
 
     let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
     spawn_claude_process(window, cmd, tab_id, stdin_payload, None).await
@@ -3326,6 +3335,18 @@ pub async fn interrupt_claude_execution(
     tab_id: String,
 ) -> Result<bool, String> {
     stop_claude_process(window, tab_id, ClaudeStopMode::Interrupt).await
+}
+
+/// The Lab: the user's answer to a permission request shown in the chat.
+/// Returns false when the request was no longer pending.
+#[tauri::command]
+pub async fn respond_claude_permission(
+    window: WebviewWindow,
+    tab_id: String,
+    request_id: String,
+    allow: bool,
+) -> Result<bool, String> {
+    answer_claude_permission(window, tab_id, request_id, allow).await
 }
 
 // 鈹€鈹€鈹€ Session Listing 鈹€鈹€鈹€
@@ -4465,11 +4486,23 @@ mod tests {
     #[test]
     fn test_common_claude_args_has_required_flags() {
         let args = common_claude_args();
-        assert!(args.contains(&"--output-format".to_string()));
-        assert!(args.contains(&"stream-json".to_string()));
+        let pairs: Vec<(&str, &str)> = args
+            .windows(2)
+            .map(|w| (w[0].as_str(), w[1].as_str()))
+            .collect();
+        assert!(pairs.contains(&("--input-format", "stream-json")));
+        assert!(pairs.contains(&("--output-format", "stream-json")));
+        assert!(pairs.contains(&("--permission-mode", "default")));
+        assert!(pairs.contains(&("--permission-prompt-tool", "stdio")));
         assert!(args.contains(&"--verbose".to_string()));
-        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"--append-system-prompt".to_string()));
+    }
+
+    #[test]
+    fn test_common_claude_args_never_skip_permissions() {
+        let args = common_claude_args();
+        assert!(!args.iter().any(|a| a.contains("dangerously")));
+        assert!(!args.iter().any(|a| a == "bypassPermissions"));
     }
 
     #[test]
@@ -4489,17 +4522,137 @@ mod tests {
             vec!["--resume".to_string(), "abc".to_string()],
             "hello 鏂囦欢".into(),
         );
-        assert!(args.contains(&"-p".to_string()));
-        #[cfg(target_os = "windows")]
-        {
-            assert_eq!(stdin_payload.as_deref(), Some("hello 鏂囦欢"));
-            assert!(!args.contains(&"hello 鏂囦欢".to_string()));
+        assert_eq!(args, vec!["--resume", "abc", "-p"]);
+        // Every platform: the prompt is one stream-json line on stdin, never an argument.
+        assert!(!stdin_payload.contains('\n'));
+        let line: serde_json::Value = serde_json::from_str(&stdin_payload).unwrap();
+        assert_eq!(
+            line,
+            json!({
+                "type": "user",
+                "message": { "role": "user", "content": "hello 鏂囦欢" },
+            })
+        );
+    }
+
+    #[test]
+    fn test_claude_code_args_compose_prefix_model_and_common_flags() {
+        let (args, stdin_payload) = claude_code_args(
+            vec!["-c".to_string()],
+            Some("haiku".to_string()),
+            "Why does this fail?".to_string(),
+        );
+        assert_eq!(&args[..4], &["-c", "-p", "--model", "haiku"]);
+        assert_eq!(&args[4..], common_claude_args().as_slice());
+        assert!(!args.iter().any(|a| a.contains("Why does this fail?")));
+        assert!(stdin_payload.contains("Why does this fail?"));
+    }
+
+    /// The one live check for F2. It spends a few haiku tokens, so it only runs
+    /// when asked for:
+    ///   cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml \
+    ///     live_permission_probe -- --ignored --nocapture
+    /// It drives the real `claude` through the app's own argument list, spawn
+    /// plumbing and answer lines: the Write of allowed.txt is allowed, any other
+    /// request is denied, and only allowed.txt may exist afterwards.
+    #[tokio::test]
+    #[ignore = "live: runs the real claude CLI with haiku"]
+    async fn live_permission_probe() {
+        use crate::claude_process::test_support::{channel_sink, TestEvent};
+        use crate::claude_process::{
+            answer_permission_request, spawn_claude_process_with, ClaudeProcessState,
+        };
+
+        let dir = match std::env::var_os("THE_LAB_PROBE_DIR") {
+            Some(base) => tempfile::tempdir_in(base),
+            None => tempfile::tempdir(),
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            assert_eq!(stdin_payload, None);
-            assert_eq!(args.last().map(String::as_str), Some("hello 鏂囦欢"));
-        }
+        .unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+        let claude_path = find_claude_binary().unwrap();
+        let prompt = "Use the Write tool to create allowed.txt containing hi, then use the Write tool to create denied.txt containing hi.".to_string();
+        let (args, stdin_line) = claude_code_args(Vec::new(), Some("haiku".to_string()), prompt);
+        let cmd = create_command(&claude_path, args, &project, None);
+        let state = ClaudeProcessState::default();
+        let (sink, mut rx) = channel_sink();
+        spawn_claude_process_with(
+            sink,
+            state.clone(),
+            "probe",
+            cmd,
+            "tab-probe".to_string(),
+            stdin_line,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut allowed = 0;
+        let mut denied = 0;
+        let success = loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(180), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match event {
+                TestEvent::Output(data) => {
+                    let msg: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+                    if msg["type"] == "control_request" {
+                        let request = &msg["request"];
+                        let tool = request["tool_name"].as_str().unwrap_or("");
+                        let path = request["input"]["file_path"].as_str().unwrap_or("");
+                        let allow = tool == "Write" && path.ends_with("allowed.txt");
+                        eprintln!(
+                            "[probe] can_use_tool {} {} -> {}",
+                            tool,
+                            request["input"],
+                            if allow { "allow" } else { "deny" }
+                        );
+                        let request_id = msg["request_id"].as_str().unwrap();
+                        let answered = answer_permission_request(
+                            &state,
+                            "probe",
+                            "tab-probe",
+                            request_id,
+                            allow,
+                        )
+                        .await
+                        .unwrap();
+                        assert!(answered);
+                        if allow {
+                            allowed += 1;
+                        } else {
+                            denied += 1;
+                        }
+                    } else if msg["type"] == "result" {
+                        eprintln!(
+                            "[probe] result {}: {}",
+                            msg["subtype"], msg["result"]
+                        );
+                    }
+                }
+                TestEvent::Error(line) => eprintln!("[probe] stderr: {}", line),
+                TestEvent::Complete(success) => break success,
+            }
+        };
+
+        let allowed_path = dir.path().join("allowed.txt");
+        let denied_path = dir.path().join("denied.txt");
+        eprintln!(
+            "[probe] allowed={} denied={} allowed.txt={} denied.txt={}",
+            allowed,
+            denied,
+            allowed_path.exists(),
+            denied_path.exists()
+        );
+        assert!(success, "claude exited after its result");
+        assert!(allowed >= 1, "the Write of allowed.txt asked for permission");
+        assert!(denied >= 1, "the Write of denied.txt asked for permission");
+        assert_eq!(
+            std::fs::read_to_string(&allowed_path).unwrap().trim(),
+            "hi"
+        );
+        assert!(!denied_path.exists(), "a denied Write creates nothing");
     }
 
     #[test]
