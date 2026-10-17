@@ -40,11 +40,16 @@ pub async fn python_interpreter_for(
     project_root: String,
     file: String,
 ) -> Result<FileInterpreter, String> {
-    blocking(move || {
-        let map = python::python_map_at(Path::new(&project_root)).map_err(|e| e.to_string())?;
-        Ok(interpreter_for(&map, &file))
+    blocking(move || file_interpreter(Path::new(&project_root), &file)).await
+}
+
+/// Only the interpreter chosen is asked for its version, as for Run.
+fn file_interpreter(project_root: &Path, file: &str) -> Result<FileInterpreter, String> {
+    let chosen = python::interpreter_for_file(project_root, file).map_err(|e| e.to_string())?;
+    Ok(FileInterpreter {
+        folder: chosen.folder,
+        interpreter: chosen.interpreter,
     })
-    .await
 }
 
 fn interpreter_for(map: &PythonMap, file: &str) -> FileInterpreter {
@@ -181,6 +186,14 @@ mod tests {
         let other = serde_json::to_value(interpreter_for(&map, "tools/build.py")).unwrap();
         assert!(other["folder"].is_null());
         assert_ne!(other["source"], "config");
+
+        // The command asks for one file only, and gives the same.
+        for file in ["sim/antenna.py", "tools/build.py"] {
+            let one = file_interpreter(project.path(), file).unwrap();
+            let from_map = interpreter_for(&map, file);
+            assert_eq!(one.folder, from_map.folder, "{file}");
+            assert_eq!(one.interpreter, from_map.interpreter, "{file}");
+        }
     }
 
     /// Prints the interpreter map of a real project and the interpreter of
