@@ -515,6 +515,93 @@ fn quitting_ends_every_run() {
     }
 }
 
+/// Whether no process is left in the process group `group`.
+fn group_is_gone(group: &str) -> bool {
+    !Command::new("/bin/kill")
+        .args(["-0", "--", &format!("-{group}")])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// Waits up to `patience` for `done`.
+fn eventually(patience: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + patience;
+    while Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    done()
+}
+
+const QUIT_PROJECT: &str = "THELAB_QUIT_PROJECT";
+
+/// The app's quit path, in a process of its own for
+/// `quitting_leaves_nothing_a_script_started_behind`: start `sim.py`, end
+/// every run, wait for each, and exit at once. Without THELAB_QUIT_PROJECT
+/// it does nothing.
+#[test]
+#[ignore]
+fn quit_like_the_app() {
+    let Some(root) = std::env::var_os(QUIT_PROJECT) else {
+        return;
+    };
+    let runs = Runs::default();
+    let recorder = Arc::new(Recorder::default());
+    runs.start(
+        "window",
+        "run-1",
+        Path::new(&root),
+        "sim.py",
+        recorder.clone(),
+    )
+    .unwrap();
+    recorder.wait_for_line("ready");
+    for ending in runs.end_all() {
+        assert!(ending.wait(PATIENCE));
+    }
+    std::process::exit(0);
+}
+
+#[test]
+fn quitting_leaves_nothing_a_script_started_behind() {
+    // The script ends on SIGINT at once, but a solver it started ignores
+    // SIGINT. Quitting must kill that one before the app exits.
+    let project = Project::with_venv("quit-children");
+    project.write(
+        "sim.py",
+        "echo $$ > group\nsh -c 'trap \"\" INT; sleep 40' &\nsleep 0.2\necho ready\nsleep 60\n",
+    );
+    let mut app = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "run::tests::quit_like_the_app",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env(QUIT_PROJECT, &project.0)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let quit = eventually(PATIENCE, || app.try_wait().unwrap().is_some());
+    let group = fs::read_to_string(project.0.join("group"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let gone = !group.is_empty() && eventually(Duration::from_secs(2), || group_is_gone(&group));
+    if !group.is_empty() {
+        signal_group(group.parse().unwrap(), "KILL");
+    }
+    let _ = app.kill();
+    assert!(quit, "the app did not quit");
+    assert!(!group.is_empty(), "the script did not start");
+    assert!(gone, "the script's process group {group} outlived the app");
+}
+
 #[test]
 fn a_refused_run_says_why() {
     let project = Project::new("refused");

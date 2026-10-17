@@ -217,11 +217,13 @@ struct Active {
     process: Arc<Process>,
 }
 
-/// A run being ended; `wait` blocks until its process is gone.
+/// A run being ended; `wait` blocks until nothing of it is left.
 pub struct Ending(Arc<Process>);
 
 impl Ending {
-    /// Whether the process ended within `timeout`.
+    /// Whether the run ended within `timeout`: the script has exited and,
+    /// when it was stopped, what it started has been killed with it. Only
+    /// then may the app exit, or that would be left running.
     pub fn wait(&self, timeout: Duration) -> bool {
         self.0.wait(timeout)
     }
@@ -369,17 +371,26 @@ fn still_running(active: &Active) -> String {
 /// A script's process: the leader of its own process group.
 struct Process {
     group: u32,
-    exited: Mutex<bool>,
-    exited_changed: Condvar,
+    state: Mutex<ProcessState>,
+    changed: Condvar,
     stopping: AtomicBool,
+}
+
+#[derive(Default)]
+struct ProcessState {
+    /// The script has exited and been reaped.
+    reaped: bool,
+    /// Reaped, and when it was stopped, its group has been killed: nothing
+    /// of the run is left.
+    ended: bool,
 }
 
 impl Process {
     fn new(group: u32) -> Self {
         Self {
             group,
-            exited: Mutex::new(false),
-            exited_changed: Condvar::new(),
+            state: Mutex::default(),
+            changed: Condvar::new(),
             stopping: AtomicBool::new(false),
         }
     }
@@ -387,38 +398,43 @@ impl Process {
     /// SIGINT to the group, then SIGKILL after `grace` if the script has not
     /// ended. False if it had ended or a stop was already under way.
     fn stop(self: &Arc<Self>, grace: Duration) -> bool {
-        if self.stopping.swap(true, Ordering::SeqCst) || *lock(&self.exited) {
+        if self.stopping.swap(true, Ordering::SeqCst) || lock(&self.state).reaped {
             return false;
         }
         signal_group(self.group, "INT");
         let process = Arc::clone(self);
         std::thread::spawn(move || {
-            let exited = lock(&process.exited);
-            let (exited, _) = process
-                .exited_changed
-                .wait_timeout_while(exited, grace, |exited| !*exited)
+            let state = lock(&process.state);
+            let (state, _) = process
+                .changed
+                .wait_timeout_while(state, grace, |state| !state.reaped)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             // Still holding the lock: the script cannot be reaped and its
             // group number reused between this check and the signal.
-            if !*exited {
+            if !state.reaped {
                 signal_group(process.group, "KILL");
             }
         });
         true
     }
 
-    fn mark_exited(&self) {
-        *lock(&self.exited) = true;
-        self.exited_changed.notify_all();
+    fn mark_reaped(&self) {
+        lock(&self.state).reaped = true;
+        self.changed.notify_all();
+    }
+
+    fn mark_ended(&self) {
+        lock(&self.state).ended = true;
+        self.changed.notify_all();
     }
 
     fn wait(&self, timeout: Duration) -> bool {
-        let exited = lock(&self.exited);
-        let (exited, _) = self
-            .exited_changed
-            .wait_timeout_while(exited, timeout, |exited| !*exited)
+        let state = lock(&self.state);
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| !state.ended)
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *exited
+        state.ended
     }
 }
 
@@ -517,12 +533,14 @@ fn watch(watch: Watch) {
     std::thread::spawn(move || {
         let status = child.wait();
         let seconds = started.elapsed().as_secs_f64();
-        process.mark_exited();
+        process.mark_reaped();
         let stopped = process.stopping.load(Ordering::SeqCst);
         if stopped {
             // What the script started goes with it.
             signal_group(process.group, "KILL");
         }
+        // Only now: quitting waits for this, then exits at once.
+        process.mark_ended();
         let deadline = Instant::now() + DRAIN_TIMEOUT;
         for _ in 0..readers {
             let left = deadline.saturating_duration_since(Instant::now());
