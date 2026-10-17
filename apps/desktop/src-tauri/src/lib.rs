@@ -6,6 +6,7 @@ mod claude_control;
 mod claude_process;
 mod history;
 mod latex;
+mod python_run;
 mod skills;
 mod slash_commands;
 mod uv;
@@ -563,6 +564,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(claude::ClaudeProcessState::default())
         .manage(latex::LatexCompilerState::default())
+        // The Lab: the Python scripts running, one per window.
+        .manage(thelab_core::run::Runs::default())
         .manage(zotero::ZoteroOAuthState::default())
         .setup(|app| {
             // Safety net: force-show the main window after a timeout if the
@@ -651,6 +654,11 @@ pub fn run() {
             uv::setup_project_venv,
             uv::uv_add_packages,
             uv::uv_run_command,
+            python_run::python_interpreters,
+            python_run::python_interpreter_for,
+            python_run::python_run_start,
+            python_run::python_run_stop,
+            python_run::python_run_close_project,
             get_system_info,
             open_debug_window,
         ])
@@ -715,12 +723,26 @@ pub fn run() {
                     claude::kill_process_for_window(&state_clone, &label_clone).await;
                 });
 
+                // End the window's Python script: SIGINT, then a kill after
+                // 3 s. Quitting waits for that, so no script is left behind.
+                let runs = app_handle.state::<thelab_core::run::Runs>();
+                let ending = runs.end(&label);
+
                 // Quit the app when the last window is closed
                 if app_handle.webview_windows().is_empty() {
+                    if let Some(ending) = ending {
+                        ending.wait(python_run::QUIT_WAIT);
+                    }
                     app_handle.exit(0);
                 }
             }
             tauri::RunEvent::ExitRequested { .. } => {
+                // Quitting ends every Python script, waiting for each to go.
+                let runs = app_handle.state::<thelab_core::run::Runs>();
+                for ending in runs.end_all() {
+                    ending.wait(python_run::QUIT_WAIT);
+                }
+
                 // Clean up LaTeX build temp directories
                 let latex_state = app_handle.state::<latex::LatexCompilerState>();
                 let state_clone = latex_state.inner().clone();
