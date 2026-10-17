@@ -319,20 +319,25 @@ impl Walker<'_> {
         }
     }
 
-    /// Finds the file an `\input` names: relative to the main file's
-    /// directory as TeX does, or failing that next to the including file.
     fn resolve_input(&self, name: &str, from: &str) -> Option<String> {
-        let name = name.trim();
-        for base in [self.main_dir.as_str(), parent(from)] {
-            let plain = normalize(&join(base, name));
-            for candidate in [format!("{plain}.tex"), plain] {
-                if self.root.join(&candidate).is_file() {
-                    return Some(candidate);
-                }
+        resolve_input(self.root, &self.main_dir, name, from)
+    }
+}
+
+/// Finds the file an `\input` in `from` names, relative to the project
+/// `root`: relative to the main file's directory `main_dir` as TeX does, or
+/// failing that next to the including file.
+pub(crate) fn resolve_input(root: &Path, main_dir: &str, name: &str, from: &str) -> Option<String> {
+    let name = name.trim();
+    for base in [main_dir, parent(from)] {
+        let plain = normalize(&join(base, name));
+        for candidate in [format!("{plain}.tex"), plain] {
+            if root.join(&candidate).is_file() {
+                return Some(candidate);
             }
         }
-        None
     }
+    None
 }
 
 fn is_environment(command: &Command, which: &str, environment: &str) -> bool {
@@ -410,7 +415,7 @@ fn without_labels(title: &str) -> String {
     out
 }
 
-fn parent(path: &str) -> &str {
+pub(crate) fn parent(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(directory, _)| directory)
 }
 

@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::logparse::{
     BoxSummary, Diagnostic, OutputFile, Severity, parse_blg, parse_tectonic_console, parse_tex_log,
 };
+use crate::outline::{parent, resolve_input};
 use crate::scan::{Project, read_text, scan};
 use crate::tex::Source;
 use crate::tools::{Output, find_program, run};
@@ -92,8 +93,9 @@ pub fn compile(root: &Path, options: &CompileOptions) -> Result<CompileResult> {
     let project = scan(root, options.main.as_deref())?;
     let main = project.require_main()?.to_string();
     let main_text = read_text(&project.root.join(&main)).unwrap_or_default();
-    let program = document_program(&main_text);
-    let biber = uses_biber(&main_text);
+    let preamble = preamble(&project.root, &main, &main_text);
+    let program = document_program(&main_text, &preamble);
+    let biber = uses_biber(&preamble);
     let (engine, executable) = choose_engine(&project, options.engine, program, biber)?;
 
     let build = project.root.join(BUILD_DIRECTORY);
@@ -112,9 +114,9 @@ pub fn compile(root: &Path, options: &CompileOptions) -> Result<CompileResult> {
     let bcf = build.join(format!("{stem}.bcf"));
 
     let clock = Instant::now();
-    // An earlier run's control file also counts, for a preamble kept in a
-    // separate file. Everything below sees the build folder as it is once
-    // the turn has come.
+    // An earlier run's control file also counts, for biblatex loaded where
+    // `preamble` does not look (a package of the project's own). Everything
+    // below sees the build folder as it is once the turn has come.
     let turn = if biber || bcf.is_file() {
         biber_turn()
     } else {
@@ -375,19 +377,74 @@ enum Program {
     LuaLaTeX,
 }
 
-/// The program for a document: the one its magic comment asks for, else
-/// XeLaTeX for a preamble that loads a package pdfLaTeX cannot run (as
-/// ClaudePrism's TeX Live option did), else none in particular. A preamble
-/// kept in a separate file is not looked at.
-fn document_program(main_text: &str) -> Option<Program> {
-    main_program(main_text).or_else(|| needs_unicode_engine(main_text).then_some(Program::XeLaTeX))
+/// The program for a document: the one the magic comment of its main file
+/// asks for, else XeLaTeX for a `preamble` that loads a package pdfLaTeX
+/// cannot run (as ClaudePrism's TeX Live option did), else none in
+/// particular.
+fn document_program(main_text: &str, preamble: &str) -> Option<Program> {
+    main_program(main_text).or_else(|| needs_unicode_engine(preamble).then_some(Program::XeLaTeX))
+}
+
+/// The text that loads a document's packages: its main file, then the part
+/// before `\begin{document}` of each file that an `\input` or `\include`
+/// before it names, and of the files those name in turn. A preamble is
+/// often kept in a file of its own.
+fn preamble(root: &Path, main: &str, main_text: &str) -> String {
+    let mut text = main_text.to_string();
+    let mut seen = vec![main.to_string()];
+    add_preamble_inputs(root, parent(main), main, main_text, &mut seen, &mut text);
+    text
+}
+
+/// Adds the preambles of the files `file_text` inputs to `text`, and says
+/// whether `\begin{document}` came, which ends the preamble.
+fn add_preamble_inputs(
+    root: &Path,
+    main_dir: &str,
+    file: &str,
+    file_text: &str,
+    seen: &mut Vec<String>,
+    text: &mut String,
+) -> bool {
+    for command in Source::new(file_text).commands() {
+        if command.name == "begin" && command.argument == Some("document") {
+            return true;
+        }
+        let Some(name) = command
+            .argument
+            .filter(|_| matches!(command.name, "input" | "include"))
+        else {
+            continue;
+        };
+        let Some(path) = resolve_input(root, main_dir, name, file) else {
+            continue;
+        };
+        if seen.contains(&path) {
+            continue;
+        }
+        seen.push(path.clone());
+        let Ok(input) = read_text(&root.join(&path)) else {
+            continue;
+        };
+        let end = Source::new(&input)
+            .commands()
+            .iter()
+            .find(|c| c.name == "begin" && c.argument == Some("document"))
+            .map_or(input.len(), |c| c.start);
+        text.push('\n');
+        text.push_str(&input[..end]);
+        if add_preamble_inputs(root, main_dir, &path, &input, seen, text) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Packages that need XeTeX or LuaTeX: pdfLaTeX stops at them.
 const UNICODE_ENGINE_PACKAGES: [&str; 4] = ["fontspec", "unicode-math", "polyglossia", "xeCJK"];
 
-fn needs_unicode_engine(main_text: &str) -> bool {
-    loads_package(main_text, |name, _| UNICODE_ENGINE_PACKAGES.contains(&name))
+fn needs_unicode_engine(preamble: &str) -> bool {
+    loads_package(preamble, |name, _| UNICODE_ENGINE_PACKAGES.contains(&name))
 }
 
 /// latexmk's options for a program. XeLaTeX writes the PDF itself, as
@@ -416,23 +473,22 @@ fn main_program(main_text: &str) -> Option<Program> {
     })
 }
 
-/// Whether the main file loads biblatex with biber, its default backend. A
-/// preamble kept in a separate file is not looked at.
-fn uses_biber(main_text: &str) -> bool {
+/// Whether a preamble loads biblatex with biber, its default backend.
+fn uses_biber(preamble: &str) -> bool {
     let is_bibtex_backend = |option: &str| {
         option.split_once('=').is_some_and(|(key, value)| {
             key.trim() == "backend" && value.trim().starts_with("bibtex")
         })
     };
-    loads_package(main_text, |name, options| {
+    loads_package(preamble, |name, options| {
         name == "biblatex" && !options.iter().any(|option| is_bibtex_backend(option))
     })
 }
 
 /// Whether a `\usepackage` or `\RequirePackage` outside comments loads a
 /// package that `matches`, given its name and options.
-fn loads_package(main_text: &str, matches: impl Fn(&str, &[&str]) -> bool) -> bool {
-    Source::new(main_text).commands().iter().any(|command| {
+fn loads_package(text: &str, matches: impl Fn(&str, &[&str]) -> bool) -> bool {
+    Source::new(text).commands().iter().any(|command| {
         if !matches!(command.name, "usepackage" | "RequirePackage") {
             return false;
         }
@@ -666,13 +722,81 @@ mod tests {
             ("biblatex-fontspec.tex", Some(Program::XeLaTeX)),
         ];
         for (name, program) in cases {
-            assert_eq!(document_program(&engine_fixture(name)), program, "{name}");
+            let text = engine_fixture(name);
+            assert_eq!(document_program(&text, &text), program, "{name}");
         }
     }
 
     #[test]
+    fn the_preamble_takes_in_the_files_its_inputs_name() {
+        // main.tex inputs preamble.tex, which inputs settings/fonts.tex,
+        // which loads fontspec; body.tex comes after \begin{document}.
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/engine/preamble-in-a-file");
+        let main_text = fs::read_to_string(root.join("main.tex")).unwrap();
+        let preamble = preamble(&root, "main.tex", &main_text);
+
+        assert!(preamble.contains("\\usepackage{amsmath}"), "{preamble}");
+        assert!(preamble.contains("\\usepackage{fontspec}"), "{preamble}");
+        assert!(!preamble.contains("The body"), "{preamble}");
+        assert_eq!(
+            document_program(&main_text, &preamble),
+            Some(Program::XeLaTeX)
+        );
+        assert_eq!(document_program(&main_text, &main_text), None);
+    }
+
+    #[test]
+    fn the_preamble_stops_at_begin_document_and_skips_what_it_cannot_read() {
+        let root = std::env::temp_dir().join(format!("thelab-preamble-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let write = |name: &str, text: &str| {
+            let path = root.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        // The main file sits in a folder: inputs are found from there.
+        write(
+            "thesis/main.tex",
+            "\\documentclass{book}\n\\input{missing}\n\\include{setup}\n\
+             \\begin{document}\n\\input{late}\n\\end{document}\n",
+        );
+        // It inputs itself and the main file: neither is read twice.
+        write(
+            "thesis/setup.tex",
+            "\\usepackage[style=ieee]{biblatex}\n\\input{setup}\n\\input{main}\n",
+        );
+        write("thesis/late.tex", "\\usepackage{unicode-math}\n");
+
+        let main_text = fs::read_to_string(root.join("thesis/main.tex")).unwrap();
+        let found = preamble(&root, "thesis/main.tex", &main_text);
+        assert!(uses_biber(&found), "{found}");
+        assert!(!uses_biber(&main_text));
+        assert_eq!(found.matches("biblatex").count(), 1, "{found}");
+        assert_eq!(document_program(&main_text, &found), None, "{found}");
+
+        // A file the preamble inputs may start the document itself.
+        write(
+            "thesis/setup.tex",
+            "\\usepackage{biblatex}\n\\begin{document}\n\\usepackage{fontspec}\n",
+        );
+        write(
+            "thesis/main.tex",
+            "\\documentclass{book}\n\\input{setup}\n\\input{late}\n",
+        );
+        let main_text = fs::read_to_string(root.join("thesis/main.tex")).unwrap();
+        let found = preamble(&root, "thesis/main.tex", &main_text);
+        assert!(uses_biber(&found), "{found}");
+        assert_eq!(document_program(&main_text, &found), None, "{found}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn latexmk_runs_the_program_the_document_needs() {
-        let options = |name| latexmk_program(document_program(&engine_fixture(name)));
+        let options = |name| {
+            let text = engine_fixture(name);
+            latexmk_program(document_program(&text, &text))
+        };
         assert_eq!(options("plain.tex"), ["-pdf"]);
         assert_eq!(options("fontspec-pdflatex-comment.tex"), ["-pdf"]);
         assert_eq!(options("fontspec.tex"), ["-pdf", "-pdflatex=xelatex %O %S"]);
@@ -687,7 +811,7 @@ mod tests {
     fn biber_and_lualatex_put_latexmk_first_and_xelatex_keeps_tectonic_first() {
         let order = |name| {
             let text = engine_fixture(name);
-            preference(document_program(&text), uses_biber(&text))
+            preference(document_program(&text, &text), uses_biber(&text))
         };
         let tectonic_first = [Engine::Tectonic, Engine::Latexmk];
         let latexmk_first = [Engine::Latexmk, Engine::Tectonic];

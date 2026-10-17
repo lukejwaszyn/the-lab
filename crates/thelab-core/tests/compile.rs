@@ -682,6 +682,24 @@ fn latexmk_runs_xelatex_for_fontspec_unless_a_magic_comment_says_otherwise() {
 }
 
 #[test]
+fn a_package_loaded_from_a_preamble_file_chooses_the_program_too() {
+    // main.tex inputs preamble.tex, which inputs settings/fonts.tex, which
+    // loads fontspec: pdfLaTeX would stop there.
+    if !have("latexmk") {
+        return;
+    }
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/engine/preamble-in-a-file");
+    let (_dir, result) = build(&source, Engine::Latexmk, None);
+    assert!(result.ok, "{result:#?}");
+    assert!(
+        banner(&result).starts_with("This is XeTeX,"),
+        "{}",
+        banner(&result)
+    );
+}
+
+#[test]
 fn a_fontspec_document_that_uses_biber_is_built_by_latexmk_with_xelatex() {
     if !have("latexmk") || !have("biber") {
         return;
