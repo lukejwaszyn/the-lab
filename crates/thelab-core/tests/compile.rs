@@ -446,6 +446,44 @@ fn an_empty_document_says_it_has_no_pages() {
     }
 }
 
+/// The broken-bib project: refs.bib lacks a comma, so biber stops at a
+/// syntax error and every citation is left undefined.
+fn broken_bib() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/biblatex-projects/broken-bib")
+}
+
+#[test]
+fn a_bibliography_biber_cannot_read_gives_its_error_without_a_flood_of_citations() {
+    if !have("latexmk") || !have("biber") {
+        return;
+    }
+    let dir = copy_project(&broken_bib(), "broken-bib");
+    let first = compile(dir.path(), &CompileOptions::default()).expect("compile attempted");
+    assert_eq!(first.engine, Engine::Latexmk);
+    assert!(!first.ok);
+    assert_eq!(first.errors.len(), 1, "{:#?}", first.errors);
+    assert_eq!(
+        (first.errors[0].file.as_deref(), first.errors[0].line),
+        (Some("refs.bib"), Some(11))
+    );
+    assert!(
+        first.errors[0].message.starts_with("biber: syntax error"),
+        "{:#?}",
+        first.errors
+    );
+    let warnings: Vec<&str> = first.warnings.iter().map(|w| w.message.as_str()).collect();
+    assert_eq!(warnings, ["Empty bibliography"]);
+    // pdflatex ran before biber, so there is a PDF to show beside the error.
+    assert!(first.pdf_path.is_some(), "{first:#?}");
+
+    // latexmk repeats its verdict without running anything: the same report.
+    let second = compile(dir.path(), &CompileOptions::default()).expect("compile attempted");
+    assert_eq!(second.pdf_path, first.pdf_path);
+    assert_eq!(second.errors, first.errors);
+    assert_eq!(second.warnings, first.warnings);
+    assert_eq!(second.ok, first.ok);
+}
+
 #[test]
 fn a_fatal_error_compiled_again_still_does_not_show_the_old_pdf() {
     // pdflatex leaves the previous PDF on disk when it stops in the

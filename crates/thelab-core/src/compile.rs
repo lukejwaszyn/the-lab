@@ -548,9 +548,17 @@ fn resolve(file: &str, root: &Path, main_dir: &str) -> String {
 
 /// Warnings that only say the run was not the last one it needed.
 fn is_unfinished_run_artifact(message: &str) -> bool {
+    // The kernel and natbib quote a key `like this', biblatex 'like this'.
     let undefined = message.ends_with("undefined")
-        && (message.contains("Reference `") || message.contains("Citation `"));
-    undefined || message.contains("Rerun to get") || message.contains("Label(s) may have changed")
+        && ["Reference `", "Reference '", "Citation `", "Citation '"]
+            .iter()
+            .any(|start| message.contains(start));
+    undefined
+        || message.contains("Rerun to get")
+        || message.contains("Label(s) may have changed")
+        // biblatex asking for another round of biber, or of LaTeX after it.
+        || message.contains("Please (re)run Biber")
+        || message.contains("Please rerun LaTeX")
 }
 
 fn dedup(diagnostics: &mut Vec<Diagnostic>) {
@@ -591,6 +599,34 @@ fn unexplained_failure(engine: Engine, output: &Output, limit: Duration) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn after_biber_fails_only_warnings_about_the_document_are_kept() {
+        // latexmk's log after biber stopped at a syntax error in refs.bib.
+        let log = parse_tex_log(include_str!(
+            "../tests/fixtures/logs/latexmk/broken-bib.log"
+        ));
+        let kept: Vec<&str> = log
+            .warnings
+            .iter()
+            .map(|w| w.message.as_str())
+            .filter(|message| !is_unfinished_run_artifact(message))
+            .collect();
+        assert_eq!(kept, ["Empty bibliography"]);
+    }
+
+    #[test]
+    fn undefined_keys_in_either_quote_style_are_artifacts_of_an_unfinished_run() {
+        for message in [
+            "Reference `sec:missing' on page 1 undefined",
+            "Package natbib Warning: Citation `nokey2020' on page 1 undefined",
+            "Citation 'nasa2025moon' on page 1 undefined",
+            "Label(s) may have changed. Rerun to get cross-references right",
+        ] {
+            assert!(is_unfinished_run_artifact(message), "{message}");
+        }
+        assert!(!is_unfinished_run_artifact("Empty bibliography"));
+    }
 
     #[test]
     fn a_log_that_names_the_pdf_and_its_size_wrote_it() {
