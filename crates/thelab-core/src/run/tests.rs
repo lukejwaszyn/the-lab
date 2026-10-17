@@ -430,6 +430,27 @@ fn closing_the_project_ends_its_run() {
 }
 
 #[test]
+fn a_stale_run_is_ended_by_its_id_without_touching_a_newer_one() {
+    let project = Project::with_venv("stale");
+    project.write(
+        "long.py",
+        "trap 'exit 130' INT\necho ready\nwhile :; do sleep 0.05; done\n",
+    );
+    let runs = Runs::default();
+
+    let (recorder, started) = start(&runs, &project, "long.py");
+    started.unwrap();
+    recorder.wait_for_line("ready");
+
+    assert!(runs.end_run("window", "another-run").is_none());
+    assert!(runs.is_running("window"));
+    let ending = runs.end_run("window", "run-1").expect("its own run");
+    assert!(!runs.is_running("window"));
+    assert!(ending.wait(PATIENCE));
+    assert!(recorder.wait_for_end().stopped);
+}
+
+#[test]
 fn quitting_ends_every_run() {
     let project = Project::with_venv("quit");
     project.write("stubborn.py", "trap '' INT\necho ready\nsleep 30\n");

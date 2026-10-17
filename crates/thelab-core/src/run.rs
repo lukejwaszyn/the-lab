@@ -330,6 +330,19 @@ impl Runs {
         Some(Ending(active.process))
     }
 
+    /// `end`, but only if `owner`'s script is the run `run_id`: for a run
+    /// found to be stale, without ending a newer one.
+    pub fn end_run(&self, owner: &str, run_id: &str) -> Option<Ending> {
+        let mut active = lock(&self.active);
+        if active.get(owner)?.run_id != run_id {
+            return None;
+        }
+        let ended = active.remove(owner)?;
+        drop(active);
+        ended.process.stop(self.grace);
+        Some(Ending(ended.process))
+    }
+
     /// Ends every script, for quitting the app.
     pub fn end_all(&self) -> Vec<Ending> {
         let owners: Vec<String> = lock(&self.active).keys().cloned().collect();

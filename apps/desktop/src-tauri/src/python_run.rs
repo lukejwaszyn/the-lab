@@ -80,10 +80,18 @@ pub fn python_run_stop(window: WebviewWindow, runs: State<'_, Runs>) -> bool {
 }
 
 /// The window's project is closing or switching: its script is stopped and
-/// the window can start another at once.
+/// the window can start another at once. With `run_id`, only that run is
+/// ended: one that started while its project was closing.
 #[tauri::command]
-pub fn python_run_close_project(window: WebviewWindow, runs: State<'_, Runs>) -> bool {
-    runs.end(window.label()).is_some()
+pub fn python_run_close_project(
+    window: WebviewWindow,
+    runs: State<'_, Runs>,
+    run_id: Option<String>,
+) -> bool {
+    match run_id {
+        Some(run_id) => runs.end_run(window.label(), &run_id).is_some(),
+        None => runs.end(window.label()).is_some(),
+    }
 }
 
 async fn blocking<T: Send + 'static>(
