@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
+import { usePythonEnvStore } from "@/stores/python-env-store";
 import { useDocumentStore } from "@/stores/document-store";
 import { cn } from "@/lib/utils";
 
@@ -66,6 +67,8 @@ export function UvSetupDialog({ open, onClose }: UvSetupDialogProps) {
   const handleSetupVenv = async () => {
     if (projectRoot) {
       await setupVenv(projectRoot);
+      // A new .venv becomes the interpreter of files thelab.toml does not map.
+      void usePythonEnvStore.getState().reload();
     }
   };
 

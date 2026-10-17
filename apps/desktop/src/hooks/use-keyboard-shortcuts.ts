@@ -2,6 +2,11 @@ import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getAppZoomAction, shouldHandleAppZoomShortcut } from "@/lib/app-zoom";
 import { useDocumentStore } from "@/stores/document-store";
+import { usePythonRunStore } from "@/stores/python-run-store";
+
+const IS_MAC =
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 
 export function useKeyboardShortcuts() {
   useEffect(() => {
@@ -32,6 +37,34 @@ export function useKeyboardShortcuts() {
       ) {
         e.preventDefault();
         invoke("create_new_window").catch(console.error);
+      }
+
+      // Cmd+R (macOS) / Ctrl+R (others): run the open Python file. While a
+      // script runs it starts nothing and says so; it never stops one.
+      // Only Cmd on macOS, so Vim's Ctrl+R (redo) keeps working there.
+      const runModifier = IS_MAC ? e.metaKey : e.ctrlKey;
+      if (
+        runModifier &&
+        !e.shiftKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === "r"
+      ) {
+        e.preventDefault();
+        // A held key repeats; one press is one Run.
+        if (!e.repeat && useDocumentStore.getState().projectRoot) {
+          void usePythonRunStore.getState().run();
+        }
+      }
+
+      // Cmd+. (macOS) / Ctrl+. (others): stop the running script.
+      if (
+        runModifier &&
+        !e.shiftKey &&
+        !e.altKey &&
+        (e.key === "." || e.code === "Period")
+      ) {
+        e.preventDefault();
+        void usePythonRunStore.getState().stop();
       }
 
       // Cmd+X (macOS) / Ctrl+X (others): Capture & Ask

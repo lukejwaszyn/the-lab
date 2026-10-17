@@ -35,6 +35,8 @@ import {
 } from "@/components/ui/select";
 import { useDocumentStore } from "@/stores/document-store";
 import { useSettingsStore } from "@/stores/settings-store";
+import { isPythonFile } from "@/lib/python-env";
+import { RunControls } from "./output-panel";
 
 interface EditorInfo {
   id: string;
@@ -267,6 +269,12 @@ export function EditorToolbar({
           {fileName}
         </span>
       </div>
+      {activeFilePath && isPythonFile(activeFilePath) && (
+        <>
+          <div className="mx-2 h-4 w-px shrink-0 bg-border" />
+          <RunControls />
+        </>
+      )}
       <div className="mx-2 h-4 w-px shrink-0 bg-border" />
       <TooltipIconButton
         tooltip="Bold (\\textbf)"

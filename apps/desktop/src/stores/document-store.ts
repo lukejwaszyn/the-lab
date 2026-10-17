@@ -74,7 +74,7 @@ export function clearPdfBytesCache() {
   _currentPdfRootId = null;
 }
 
-interface DocumentState {
+export interface DocumentState {
   projectRoot: string | null;
   files: ProjectFile[];
   folders: string[];

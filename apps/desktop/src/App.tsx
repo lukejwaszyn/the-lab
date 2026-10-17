@@ -12,6 +12,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
+import { watchInterpreters } from "@/stores/python-env-store";
+import { watchProjectForRuns } from "@/stores/python-run-store";
 import { ErrorFallback } from "@/components/error-fallback";
 import { createLogger } from "@/lib/debug/logger";
 import { EnvironmentOnboarding } from "@/components/environment-onboarding";
@@ -181,6 +183,17 @@ export function App({ onReady }: { onReady?: () => void }) {
 
   // Register global keyboard shortcuts (Cmd+S, Cmd+N) at the app level
   useKeyboardShortcuts();
+
+  // The Lab: the interpreter map and Run follow the open project; closing
+  // or switching it ends its script.
+  useEffect(() => {
+    const stopWatchingInterpreters = watchInterpreters();
+    const stopWatchingRuns = watchProjectForRuns();
+    return () => {
+      stopWatchingInterpreters();
+      stopWatchingRuns();
+    };
+  }, []);
 
   useEffect(() => {
     const preventNativeContextMenu = (event: MouseEvent) => {

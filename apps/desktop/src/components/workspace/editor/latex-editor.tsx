@@ -62,6 +62,7 @@ import {
 import { useSettingsStore } from "@/stores/settings-store";
 import { useCompileReportStore } from "@/stores/compile-report-store";
 import { EditorToolbar } from "./editor-toolbar";
+import { OutputPanel } from "./output-panel";
 import { SelectionToolbar, type ToolbarAction } from "./selection-toolbar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1445,6 +1446,8 @@ export function LatexEditor() {
           }}
         />
       )}
+      {/* Run's output, beside Problems; it shows whatever file is open. */}
+      <OutputPanel />
       {!isPdf && !isImage && !isLargeFileNotLoaded && activeFileChange && (
         <ProposedChangesPanel
           change={activeFileChange}
