@@ -92,7 +92,7 @@ pub fn compile(root: &Path, options: &CompileOptions) -> Result<CompileResult> {
     let project = scan(root, options.main.as_deref())?;
     let main = project.require_main()?.to_string();
     let main_text = read_text(&project.root.join(&main)).unwrap_or_default();
-    let program = main_program(&main_text);
+    let program = document_program(&main_text);
     let biber = uses_biber(&main_text);
     let (engine, executable) = choose_engine(&project, options.engine, program, biber)?;
 
@@ -146,11 +146,7 @@ pub fn compile(root: &Path, options: &CompileOptions) -> Result<CompileResult> {
             mirror_directories(&project, main_dir, &build);
             let file_name = main.rsplit('/').next().unwrap_or(&main);
             command.current_dir(project.root.join(main_dir));
-            command.arg(match program {
-                Some(Program::XeLaTeX) => "-xelatex",
-                Some(Program::LuaLaTeX) => "-lualatex",
-                _ => "-pdf",
-            });
+            command.args(latexmk_program(program));
             command.args(["-interaction=nonstopmode", "-file-line-error", "-synctex=1"]);
             // A control file without biber's log is what a biber that never
             // started leaves behind (see `biber_turn`). latexmk would repeat
@@ -373,6 +369,32 @@ enum Program {
     LuaLaTeX,
 }
 
+/// The program for a document: the one its magic comment asks for, else
+/// XeLaTeX for a preamble that loads a package pdfLaTeX cannot run (as
+/// ClaudePrism's TeX Live option did), else none in particular. A preamble
+/// kept in a separate file is not looked at.
+fn document_program(main_text: &str) -> Option<Program> {
+    main_program(main_text).or_else(|| needs_unicode_engine(main_text).then_some(Program::XeLaTeX))
+}
+
+/// Packages that need XeTeX or LuaTeX: pdfLaTeX stops at them.
+const UNICODE_ENGINE_PACKAGES: [&str; 4] = ["fontspec", "unicode-math", "polyglossia", "xeCJK"];
+
+fn needs_unicode_engine(main_text: &str) -> bool {
+    loads_package(main_text, |name, _| UNICODE_ENGINE_PACKAGES.contains(&name))
+}
+
+/// latexmk's options for a program. XeLaTeX writes the PDF itself, as
+/// pdfLaTeX does, instead of through latexmk's -xelatex: that stops at an
+/// error before xdvipdfmx and makes the PDF on the next, unchanged, run.
+fn latexmk_program(program: Option<Program>) -> &'static [&'static str] {
+    match program {
+        Some(Program::XeLaTeX) => &["-pdf", "-pdflatex=xelatex %O %S"],
+        Some(Program::LuaLaTeX) => &["-lualatex"],
+        Some(Program::PdfLaTeX) | None => &["-pdf"],
+    }
+}
+
 fn main_program(main_text: &str) -> Option<Program> {
     main_text.lines().take(20).find_map(|line| {
         let lower = line.trim().to_ascii_lowercase();
@@ -396,16 +418,26 @@ fn uses_biber(main_text: &str) -> bool {
             key.trim() == "backend" && value.trim().starts_with("bibtex")
         })
     };
+    loads_package(main_text, |name, options| {
+        name == "biblatex" && !options.iter().any(|option| is_bibtex_backend(option))
+    })
+}
+
+/// Whether a `\usepackage` or `\RequirePackage` outside comments loads a
+/// package that `matches`, given its name and options.
+fn loads_package(main_text: &str, matches: impl Fn(&str, &[&str]) -> bool) -> bool {
     Source::new(main_text).commands().iter().any(|command| {
-        matches!(command.name, "usepackage" | "RequirePackage")
-            && command
-                .argument
-                .is_some_and(|names| names.split(',').any(|name| name.trim() == "biblatex"))
-            && !command
-                .options
-                .iter()
-                .flat_map(|options| options.split(','))
-                .any(is_bibtex_backend)
+        if !matches!(command.name, "usepackage" | "RequirePackage") {
+            return false;
+        }
+        let options: Vec<&str> = command
+            .options
+            .iter()
+            .flat_map(|options| options.split(','))
+            .collect();
+        command
+            .argument
+            .is_some_and(|names| names.split(',').any(|name| matches(name.trim(), &options)))
     })
 }
 
@@ -477,12 +509,7 @@ fn choose_engine(
     // made for it can read (Tectonic 0.17's 3.17 against TeX Live 2026's
     // biber 2.22 fails), while latexmk uses a biblatex and biber that come
     // from the same TeX Live.
-    let order = if program == Some(Program::LuaLaTeX) || biber {
-        [Engine::Latexmk, Engine::Tectonic]
-    } else {
-        [Engine::Tectonic, Engine::Latexmk]
-    };
-    order
+    preference(program, biber)
         .into_iter()
         .find_map(|engine| find_program(engine.name()).map(|path| (engine, path)))
         .ok_or_else(|| {
@@ -492,6 +519,17 @@ fn choose_engine(
                 install_hint(Engine::Latexmk)
             ))
         })
+}
+
+/// The engines to try, in order, when neither the caller nor the project
+/// names one. A document that needs XeLaTeX keeps Tectonic first: Tectonic
+/// is built on XeTeX.
+fn preference(program: Option<Program>, biber: bool) -> [Engine; 2] {
+    if program == Some(Program::LuaLaTeX) || biber {
+        [Engine::Latexmk, Engine::Tectonic]
+    } else {
+        [Engine::Tectonic, Engine::Latexmk]
+    }
 }
 
 fn install_hint(engine: Engine) -> &'static str {
@@ -599,6 +637,60 @@ fn unexplained_failure(engine: Engine, output: &Output, limit: Duration) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A main file under tests/fixtures/engine.
+    fn engine_fixture(name: &str) -> String {
+        let path = format!(
+            "{}/tests/fixtures/engine/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
+    }
+
+    #[test]
+    fn a_magic_comment_chooses_the_program_and_then_the_packages_do() {
+        let cases = [
+            ("plain.tex", None),
+            ("fontspec.tex", Some(Program::XeLaTeX)),
+            ("unicode-math.tex", Some(Program::XeLaTeX)),
+            ("polyglossia.tex", Some(Program::XeLaTeX)),
+            ("fontspec-commented-out.tex", None),
+            ("fontspec-lualatex-comment.tex", Some(Program::LuaLaTeX)),
+            ("fontspec-pdflatex-comment.tex", Some(Program::PdfLaTeX)),
+            ("biblatex-fontspec.tex", Some(Program::XeLaTeX)),
+        ];
+        for (name, program) in cases {
+            assert_eq!(document_program(&engine_fixture(name)), program, "{name}");
+        }
+    }
+
+    #[test]
+    fn latexmk_runs_the_program_the_document_needs() {
+        let options = |name| latexmk_program(document_program(&engine_fixture(name)));
+        assert_eq!(options("plain.tex"), ["-pdf"]);
+        assert_eq!(options("fontspec-pdflatex-comment.tex"), ["-pdf"]);
+        assert_eq!(options("fontspec.tex"), ["-pdf", "-pdflatex=xelatex %O %S"]);
+        assert_eq!(
+            options("unicode-math.tex"),
+            ["-pdf", "-pdflatex=xelatex %O %S"]
+        );
+        assert_eq!(options("fontspec-lualatex-comment.tex"), ["-lualatex"]);
+    }
+
+    #[test]
+    fn biber_and_lualatex_put_latexmk_first_and_xelatex_keeps_tectonic_first() {
+        let order = |name| {
+            let text = engine_fixture(name);
+            preference(document_program(&text), uses_biber(&text))
+        };
+        let tectonic_first = [Engine::Tectonic, Engine::Latexmk];
+        let latexmk_first = [Engine::Latexmk, Engine::Tectonic];
+        assert_eq!(order("plain.tex"), tectonic_first);
+        // Tectonic is built on XeTeX.
+        assert_eq!(order("fontspec.tex"), tectonic_first);
+        assert_eq!(order("biblatex-fontspec.tex"), latexmk_first);
+        assert_eq!(order("fontspec-lualatex-comment.tex"), latexmk_first);
+    }
 
     #[test]
     fn after_biber_fails_only_warnings_about_the_document_are_kept() {

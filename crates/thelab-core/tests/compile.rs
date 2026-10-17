@@ -516,3 +516,102 @@ fn a_fatal_error_compiled_again_still_does_not_show_the_old_pdf() {
         assert!(dir.path().join("build/main.pdf").is_file(), "{run}");
     }
 }
+
+/// The first line of the log a compile left: the engine's banner.
+fn banner(result: &CompileResult) -> String {
+    let log = result.log_path.as_ref().expect("a log");
+    let text = std::fs::read_to_string(log).expect("the log");
+    text.lines().next().unwrap_or_default().to_string()
+}
+
+/// A scratch project whose main.tex is `name` from tests/fixtures/engine.
+fn engine_project(name: &str) -> common::TempDir {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/engine")
+        .join(name);
+    let dir = common::TempDir::new("engine");
+    dir.write("main.tex", &std::fs::read_to_string(source).unwrap());
+    dir.write("refs.bib", KNUTH);
+    dir
+}
+
+#[test]
+fn latexmk_runs_xelatex_for_fontspec_unless_a_magic_comment_says_otherwise() {
+    if !have("latexmk") {
+        return;
+    }
+    let options = CompileOptions {
+        main: None,
+        engine: Some(Engine::Latexmk),
+    };
+    for (name, engine) in [
+        ("fontspec.tex", "XeTeX"),
+        ("unicode-math.tex", "XeTeX"),
+        ("fontspec-lualatex-comment.tex", "LuaHBTeX"),
+        ("plain.tex", "pdfTeX"),
+    ] {
+        let dir = engine_project(name);
+        let result = compile(dir.path(), &options).expect("compile attempted");
+        assert!(result.ok, "{name}: {result:#?}");
+        assert!(
+            banner(&result).starts_with(&format!("This is {engine},")),
+            "{name}: {}",
+            banner(&result)
+        );
+    }
+
+    // pdfLaTeX, as the comment asks, which fontspec stops.
+    let dir = engine_project("fontspec-pdflatex-comment.tex");
+    let result = compile(dir.path(), &options).expect("compile attempted");
+    assert!(!result.ok);
+    assert!(
+        banner(&result).starts_with("This is pdfTeX,"),
+        "{}",
+        banner(&result)
+    );
+}
+
+#[test]
+fn a_fontspec_document_that_uses_biber_is_built_by_latexmk_with_xelatex() {
+    if !have("latexmk") || !have("biber") {
+        return;
+    }
+    let dir = engine_project("biblatex-fontspec.tex");
+    let result = compile(dir.path(), &CompileOptions::default()).expect("compile attempted");
+    assert_eq!(result.engine, Engine::Latexmk);
+    assert!(result.ok, "{result:#?}");
+    assert!(
+        banner(&result).starts_with("This is XeTeX,"),
+        "{}",
+        banner(&result)
+    );
+    assert!(result.undefined_citations.is_empty(), "{result:#?}");
+}
+
+#[test]
+fn a_xelatex_error_gives_the_same_pdf_on_the_first_run_and_the_next() {
+    // latexmk's own -xelatex stops before xdvipdfmx after an error and makes
+    // the PDF only on its next, unchanged, run.
+    if !have("latexmk") {
+        return;
+    }
+    let dir = common::TempDir::new("xelatex-error");
+    dir.write(
+        "main.tex",
+        "\\documentclass{article}\n\\usepackage{fontspec}\n\\begin{document}\n\
+         Hello \\undefinedmacro world.\n\\end{document}\n",
+    );
+    let options = CompileOptions {
+        main: None,
+        engine: Some(Engine::Latexmk),
+    };
+    let first = compile(dir.path(), &options).unwrap();
+    let second = compile(dir.path(), &options).unwrap();
+    assert_eq!(
+        first.errors,
+        [error("main.tex", Some(4), "Undefined control sequence")]
+    );
+    assert!(first.pdf_path.is_some(), "{first:#?}");
+    assert_eq!(second.pdf_path, first.pdf_path);
+    assert_eq!(second.errors, first.errors);
+}
