@@ -551,13 +551,62 @@ async fn read_clipboard_file_paths() -> Result<Vec<String>, String> {
     }
 }
 
+// --- The Lab's Quit ---
+
+/// The id of The Lab's Quit menu item.
+#[cfg(target_os = "macos")]
+const QUIT_MENU_ID: &str = "thelab-quit";
+
+/// Tauri's default menu, with Quit (Cmd+Q) replaced by one that closes
+/// every window instead of ending the app at once. A window with an unsaved
+/// Word tab saves it before it closes (`docx-session.ts`), and the last
+/// window closing quits as before, ending the Python scripts on the way.
+/// Only macOS has this menu; elsewhere Tauri sets none.
+#[cfg(target_os = "macos")]
+fn app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+    let menu = Menu::default(app)?;
+    if let Some(MenuItemKind::Submenu(app_submenu)) = menu.items()?.into_iter().next() {
+        let quit = app_submenu.items()?.into_iter().find(|item| match item {
+            MenuItemKind::Predefined(p) => p.text().is_ok_and(|t| t.starts_with("Quit")),
+            _ => false,
+        });
+        if let Some(quit) = quit {
+            app_submenu.remove(&quit)?;
+            let label = format!("Quit {}", app.package_info().name);
+            app_submenu.append(&MenuItem::with_id(
+                app,
+                QUIT_MENU_ID,
+                label,
+                true,
+                Some("CmdOrCtrl+Q"),
+            )?)?;
+        }
+    }
+    Ok(menu)
+}
+
+#[cfg(target_os = "macos")]
+fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
+    if event.id() != QUIT_MENU_ID {
+        return;
+    }
+    let windows = app.webview_windows();
+    if windows.is_empty() {
+        app.exit(0);
+        return;
+    }
+    for window in windows.values() {
+        let _ = window.close();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Load .env file (walks up from cwd to find it)
     let _ = dotenvy::dotenv();
 
-    #[allow(clippy::expect_used)]
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -567,7 +616,12 @@ pub fn run() {
         .manage(latex::LatexCompilerState::default())
         // The Lab: the Python scripts running, one per window.
         .manage(thelab_core::run::Runs::default())
-        .manage(zotero::ZoteroOAuthState::default())
+        .manage(zotero::ZoteroOAuthState::default());
+    // The Lab: Quit closes the windows first, so a Word tab can save.
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(app_menu).on_menu_event(on_menu_event);
+    #[allow(clippy::expect_used)]
+    let app = builder
         .setup(|app| {
             // Safety net: force-show the main window after a timeout if the
             // frontend JS never calls `getCurrentWindow().show()`.
