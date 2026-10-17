@@ -482,6 +482,46 @@ fn emptying_the_body_after_a_good_compile_says_there_are_no_pages_every_time() {
     }
 }
 
+#[test]
+fn a_main_file_with_a_space_in_its_name_keeps_its_pdf_beside_an_error() {
+    // pdfTeX quotes such a name in the log: `Output written on "build/my
+    // thesis.pdf"`. In a subfolder of a folder with a space, the log names
+    // the PDF by its absolute path, quoted as well.
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spaced-names/my thesis.tex"),
+    )
+    .unwrap();
+    for engine in ENGINES {
+        if !have(engine.name()) {
+            continue;
+        }
+        for (tag, main) in [
+            ("spaced", "my thesis.tex"),
+            ("a folder", "src/my thesis.tex"),
+        ] {
+            let dir = common::TempDir::new(tag);
+            dir.write(main, &text);
+            let options = CompileOptions {
+                main: Some(main.to_string()),
+                engine: Some(engine),
+            };
+            let first = compile(dir.path(), &options).unwrap();
+            assert_eq!(
+                first.errors,
+                [error(main, Some(3), "Undefined control sequence")],
+                "{engine:?} {main}"
+            );
+            if engine == Engine::Latexmk {
+                // pdflatex goes on past the error and writes the PDF.
+                assert!(first.pdf_path.is_some(), "{main}: {first:#?}");
+            }
+            let second = compile(dir.path(), &options).unwrap();
+            assert_eq!(second.pdf_path, first.pdf_path, "{engine:?} {main}");
+            assert_eq!(second.errors, first.errors, "{engine:?} {main}");
+        }
+    }
+}
+
 /// The broken-bib project: refs.bib lacks a comma, so biber stops at a
 /// syntax error and every citation is left undefined.
 fn broken_bib() -> std::path::PathBuf {

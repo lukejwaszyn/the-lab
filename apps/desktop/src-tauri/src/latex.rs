@@ -1714,6 +1714,40 @@ As \\textcite{knuth1984} shows.
     }
 
     #[test]
+    fn test_a_main_file_with_a_space_shows_its_pdf_beside_an_error() {
+        // pdfTeX quotes "build/Literature Review.pdf" in its log, and TeX
+        // prints the name unquoted when it opens the file.
+        let document = "\\documentclass{article}\n\\begin{document}\nThis calls \\undefinedmacro here.\n\\end{document}\n";
+        let undefined = CompileProblem {
+            severity: "error",
+            file: Some("Literature Review.tex".to_string()),
+            line: Some(3),
+            message: "Undefined control sequence".to_string(),
+        };
+        for (choice, program) in [
+            (EngineChoice::Tectonic, "tectonic"),
+            (EngineChoice::TexLive, "latexmk"),
+        ] {
+            if !have(program) {
+                eprintln!("skipped {choice:?}: {program} is not installed");
+                continue;
+            }
+            let project = tempfile::tempdir().unwrap();
+            std::fs::write(project.path().join("Literature Review.tex"), document).unwrap();
+            let first = compile_project(project.path(), "Literature Review.tex", choice);
+            assert_eq!(first.report.errors, [undefined.clone()], "{choice:?}");
+            if choice == EngineChoice::TexLive {
+                // pdflatex goes on past the error and writes the PDF.
+                assert!(first.report.has_pdf, "{:#?}", first.report);
+            }
+            let again = compile_project(project.path(), "Literature Review.tex", choice);
+            assert_eq!(again.report.has_pdf, first.report.has_pdf, "{choice:?}");
+            assert_eq!(again.pdf, first.pdf, "{choice:?}");
+            assert_eq!(again.report.errors, first.report.errors, "{choice:?}");
+        }
+    }
+
+    #[test]
     fn test_a_blank_page_goes_on_the_line_of_the_real_begin_document() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("main.tex");

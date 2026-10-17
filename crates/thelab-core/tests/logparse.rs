@@ -476,6 +476,53 @@ fn a_quoted_absolute_output_path_wrapped_at_column_79_is_rejoined() {
 }
 
 #[test]
+fn a_file_name_with_a_space_is_followed_whole() {
+    // TeX prints the name as it is when it opens the file, `(./my
+    // thesis.tex` (Tectonic: `(my thesis.tex`), and LuaTeX quotes it,
+    // `("./my thesis.tex"`. An error or warning found by following those
+    // belongs to "my thesis.tex", not to "my".
+    let undefined = error(Some("my thesis.tex"), Some(3), "Undefined control sequence");
+    for variant in ["tectonic", "latexmk"] {
+        let log = parse_tex_log(&fixture(&format!("{variant}/spaced-name.log")));
+        assert_eq!(log.errors, [undefined.clone()], "{variant}");
+    }
+    for variant in ["latexmk/spaced-name", "latexmk/spaced-name-lualatex"] {
+        let log = parse_tex_log(&fixture(&format!("{variant}.log")));
+        assert_eq!(log.errors, [undefined.clone()], "{variant}");
+        let reference = log
+            .warnings
+            .iter()
+            .find(|w| w.message == "Reference `nowhere' on page 1 undefined")
+            .unwrap_or_else(|| panic!("{variant}: {:#?}", log.warnings));
+        assert_eq!(
+            (reference.file.as_deref(), reference.line),
+            (Some("my thesis.tex"), Some(4)),
+            "{variant}"
+        );
+    }
+}
+
+#[test]
+fn names_with_spaces_opened_on_one_line_are_followed_whole() {
+    // As pdfTeX prints files opened in turn, with text in parentheses that
+    // is no file name in between.
+    let log = "\
+(./main.tex (./chapters/first part.tex) (15.0pt too wide) (see notes 2.5)
+(./chapters/second part.tex
+LaTeX Warning: Reference `x' on page 1 undefined on input line 7.
+
+) )
+";
+    let log = parse_tex_log(log);
+    let located: Vec<(Option<&str>, Option<u32>)> = log
+        .warnings
+        .iter()
+        .map(|w| (w.file.as_deref(), w.line))
+        .collect();
+    assert_eq!(located, [(Some("chapters/second part.tex"), Some(7))]);
+}
+
+#[test]
 fn a_document_with_an_empty_body_has_no_pages_and_no_errors() {
     // What the Blank template and every new .tex file start as.
     for variant in ["tectonic", "pdflatex", "pdflatex-file-line-error"] {

@@ -396,10 +396,8 @@ impl LogParser {
         while let Some(at) = rest.find(['(', ')']) {
             let (paren, after) = rest[at..].split_at(1);
             if paren == "(" {
-                let end = after
-                    .find(|c: char| c.is_whitespace() || c == '(' || c == ')')
-                    .unwrap_or(after.len());
-                self.open.push(after[..end].to_string());
+                let (name, end) = opened_name(after);
+                self.open.push(name.to_string());
                 rest = &after[end..];
             } else {
                 self.open.pop();
@@ -429,6 +427,48 @@ impl LogParser {
             .find(|name| is_pathish(name))
             .map(|name| normalize_path(name))
     }
+}
+
+/// The name TeX printed after a `(`, and where it ends in `after`. A name
+/// ends at a space, unless LuaTeX quoted it (`("./my thesis.tex"`) or what
+/// follows the space, up to the next parenthesis or the end of the line,
+/// is the rest of a file name: path characters and spaces, ending in an
+/// extension (`(./my thesis.tex`). Other text in parentheses rarely ends
+/// like that.
+fn opened_name(after: &str) -> (&str, usize) {
+    if let Some(quoted) = after.strip_prefix('"')
+        && let Some(close) = quoted.find('"')
+    {
+        return (&quoted[..close], close + 2);
+    }
+    let end = after
+        .find(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .unwrap_or(after.len());
+    let segment = after[..after.find(['(', ')']).unwrap_or(after.len())].trim_end();
+    let spaced_name = end > 0
+        && segment.len() > end
+        && segment
+            .split(' ')
+            .all(|word| !word.is_empty() && is_pathish_part(word))
+        && ends_in_file_extension(segment);
+    if spaced_name {
+        (segment, segment.len())
+    } else {
+        (&after[..end], end)
+    }
+}
+
+/// Whether text ends like a file name: after the last slash, a dot and one
+/// to four letters or digits, starting with a letter. Stricter than
+/// `has_extension`, since it decides whether text is a file at all.
+fn ends_in_file_extension(name: &str) -> bool {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    base.rsplit_once('.').is_some_and(|(stem, extension)| {
+        !stem.is_empty()
+            && (1..=4).contains(&extension.len())
+            && extension.starts_with(|c: char| c.is_ascii_alphabetic())
+            && extension.chars().all(|c| c.is_ascii_alphanumeric())
+    })
 }
 
 fn skip_until_blank(lines: &[String], start: usize, limit: usize) -> usize {
@@ -515,11 +555,18 @@ fn has_extension(path: &str) -> bool {
     }
 }
 
+/// Whether something TeX opened looks like a file. Only `opened_name` puts a
+/// space in one.
 fn is_pathish(token: &str) -> bool {
     token.chars().any(char::is_alphabetic)
         && token
-            .chars()
-            .all(|c| c.is_alphanumeric() || "/._-+~@:".contains(c))
+            .split(' ')
+            .all(|word| !word.is_empty() && is_pathish_part(word))
+}
+
+fn is_pathish_part(word: &str) -> bool {
+    word.chars()
+        .all(|c| c.is_alphanumeric() || "/._-+~@:".contains(c))
 }
 
 fn normalize_path(path: &str) -> String {
