@@ -1581,6 +1581,51 @@ As \\textcite{knuth1984} shows.
             .find(|e| e.file.as_deref() == Some("refs.bib"))
             .unwrap_or_else(|| panic!("no error in refs.bib: {report:#?}"));
         assert!(located.line.is_some(), "{located:#?}");
+        // biber stopped, so every citation is undefined: not worth listing.
+        assert!(
+            report
+                .warnings
+                .iter()
+                .all(|w| !w.message.contains("Citation")),
+            "{report:#?}"
+        );
+
+        // Compiling again unchanged (or after a restart: .prism/build stays)
+        // gives the same answer, though latexmk only repeats its verdict.
+        let again = compile_project(project.path(), "main.tex", EngineChoice::Auto);
+        assert_eq!(again.report.has_pdf, report.has_pdf);
+        assert_eq!(again.pdf.is_some(), outcome.pdf.is_some());
+        assert_eq!(again.report.errors, report.errors);
+        assert_eq!(again.report.warnings, report.warnings);
+    }
+
+    // --- the same sources give the same preview ---
+
+    #[test]
+    fn test_unchanged_sources_with_an_error_show_their_pdf_every_time() {
+        if !have("latexmk") {
+            eprintln!("skipped: latexmk is not installed");
+            return;
+        }
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("main.tex"),
+            "\\documentclass{article}\n\\begin{document}\nThis calls \\undefinedmacro here.\n\\end{document}\n",
+        )
+        .unwrap();
+
+        let first = compile_project(project.path(), "main.tex", EngineChoice::TexLive);
+        // pdflatex goes on past the error and writes a PDF, which the
+        // preview shows while the error is in the problems panel.
+        assert!(first.report.has_pdf, "{:#?}", first.report);
+        assert!(first.pdf.is_some());
+        assert_eq!(first.report.errors.len(), 1, "{:#?}", first.report);
+        for run in ["second", "third"] {
+            let again = compile_project(project.path(), "main.tex", EngineChoice::TexLive);
+            assert!(again.report.has_pdf, "{run}: {:#?}", again.report);
+            assert_eq!(again.pdf, first.pdf, "{run}");
+            assert_eq!(again.report.errors, first.report.errors, "{run}");
+        }
     }
 
     // --- an empty document ---
@@ -1677,6 +1722,63 @@ As \\textcite{knuth1984} shows.
 
         std::fs::write(&main, "\\documentclass{article}\n\\input{body}\n").unwrap();
         assert!(!add_blank_page(&main));
+    }
+
+    // --- the program for fontspec ---
+
+    /// The engine's banner, the first line of the log a compile left.
+    fn log_banner(project: &Path) -> String {
+        let log = compiled_pdf_dir(project).join("main.log");
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        text.lines().next().unwrap_or_default().to_string()
+    }
+
+    #[test]
+    fn test_a_fontspec_document_is_compiled_with_xelatex_by_latexmk() {
+        if !have("latexmk") {
+            eprintln!("skipped: latexmk is not installed");
+            return;
+        }
+        let fontspec = "\\documentclass{article}\n\\usepackage{fontspec}\n\\begin{document}\nHello.\n\\end{document}\n";
+
+        // The TeX Live choice.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("main.tex"), fontspec).unwrap();
+        let outcome = compile_project(project.path(), "main.tex", EngineChoice::TexLive);
+        assert_eq!(outcome.report.engine, Some("latexmk"));
+        assert!(outcome.report.ok, "{:#?}", outcome.report);
+        assert!(log_banner(project.path()).starts_with("This is XeTeX,"));
+
+        // A magic comment still wins.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("main.tex"),
+            format!("% !TEX program = lualatex\n{fontspec}"),
+        )
+        .unwrap();
+        let outcome = compile_project(project.path(), "main.tex", EngineChoice::TexLive);
+        assert!(outcome.report.ok, "{:#?}", outcome.report);
+        assert!(log_banner(project.path()).starts_with("This is LuaHBTeX,"));
+
+        // Auto, with biber: latexmk runs it, with XeLaTeX.
+        if !have("biber") {
+            eprintln!("skipped Auto: biber is not installed");
+            return;
+        }
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("main.tex"),
+            BIBLATEX_MAIN.replace(
+                "\\usepackage{biblatex}",
+                "\\usepackage{fontspec}\n\\usepackage{biblatex}",
+            ),
+        )
+        .unwrap();
+        std::fs::write(project.path().join("refs.bib"), KNUTH).unwrap();
+        let outcome = compile_project(project.path(), "main.tex", EngineChoice::Auto);
+        assert_eq!(outcome.report.engine, Some("latexmk"));
+        assert!(outcome.report.ok, "{:#?}", outcome.report);
+        assert!(log_banner(project.path()).starts_with("This is XeTeX,"));
     }
 
     // --- where the PDF is ---
