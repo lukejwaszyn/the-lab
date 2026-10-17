@@ -244,6 +244,46 @@ fn the_folder_in_thelab_toml_picks_the_interpreter() {
 }
 
 #[test]
+fn a_run_asks_only_the_interpreter_of_its_file_for_its_version() {
+    // Each interpreter leaves a mark beside itself when asked: one slow to
+    // answer, set for some other folder, would delay every Run.
+    let asking = "#!/bin/sh\n\
+        if [ \"$1\" = --version ]; then touch \"$0.asked\"; echo 'Python 3.12.4'; exit 0; fi\n\
+        exec /bin/sh \"$@\"\n";
+    let project = Project::new("only-its-own");
+    for venv in ["envs/main", "envs/sim", "envs/ml"] {
+        let python = project.write(&format!("{venv}/bin/python"), asking);
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    project.write(
+        "thelab.toml",
+        "[python]\ninterpreter = \"envs/main/bin/python\"\n\n[python.folders]\n\
+         \"sim\" = \"envs/sim/bin/python\"\n\"src/ml\" = \"envs/ml/bin/python\"\n",
+    );
+    project.write("sim/antenna.py", "");
+    project.write("run.py", "");
+    let asked = |venv: &str| project.0.join(format!("{venv}/bin/python.asked")).exists();
+    let forget = || {
+        for venv in ["envs/main", "envs/sim", "envs/ml"] {
+            let _ = fs::remove_file(project.0.join(format!("{venv}/bin/python.asked")));
+        }
+    };
+
+    let sim = plan(&project.0, "sim/antenna.py").unwrap();
+    assert_eq!(sim.folder.as_deref(), Some("sim"));
+    assert_eq!(sim.program, project.0.join("envs/sim/bin/python"));
+    assert!(asked("envs/sim"));
+    assert!(!asked("envs/main") && !asked("envs/ml"));
+
+    forget();
+    let main = plan(&project.0, "run.py").unwrap();
+    assert_eq!(main.folder, None);
+    assert_eq!(main.program, project.0.join("envs/main/bin/python"));
+    assert!(asked("envs/main"));
+    assert!(!asked("envs/sim") && !asked("envs/ml"));
+}
+
+#[test]
 fn stdout_and_stderr_arrive_interleaved_line_by_line() {
     let project = Project::with_venv("streams");
     project.write(

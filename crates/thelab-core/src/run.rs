@@ -101,7 +101,7 @@ pub struct Plan {
 }
 
 /// Decides how `file` (relative to `root`) runs, reading `thelab.toml` and
-/// asking the interpreters for their versions afresh, so an edit to the
+/// asking the file's interpreter for its version afresh, so an edit to the
 /// file counts at once. The error says in plain words why it cannot run.
 pub fn plan(root: &Path, file: &str) -> Result<Plan, String> {
     let file = relative_file(file)?;
@@ -116,8 +116,9 @@ pub fn plan(root: &Path, file: &str) -> Result<Plan, String> {
             "{file} was not run: it is not in the project folder any more."
         ));
     }
-    let map = python::python_map_at(root).map_err(|e| format!("{name} was not run: {e}"))?;
-    let (folder, interpreter) = map.interpreter_for(&file);
+    let chosen = python::interpreter_for_file(root, &file)
+        .map_err(|e| format!("{name} was not run: {e}"))?;
+    let interpreter = chosen.interpreter;
     if let Some(problem) = &interpreter.problem {
         return Err(format!("{name} was not run: {problem}"));
     }
@@ -127,11 +128,11 @@ pub fn plan(root: &Path, file: &str) -> Result<Plan, String> {
         ));
     };
     Ok(Plan {
-        root: PathBuf::from(&map.root),
+        root: chosen.root,
         file,
         program: PathBuf::from(program),
         virtual_env: interpreter.virtual_env.as_ref().map(PathBuf::from),
-        folder: folder.map(str::to_string),
+        folder: chosen.folder,
     })
 }
 

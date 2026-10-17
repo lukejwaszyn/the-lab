@@ -140,39 +140,19 @@ fn python_map_with(project: &Project, find: impl Fn(&str) -> Option<PathBuf>) ->
     let config = project.config.python.clone().unwrap_or_default();
     let mut notes = Vec::new();
 
-    let default = match &config.interpreter {
-        Some(value) => configured(value, root, &find, "interpreter"),
-        None => detect(root, &find, &mut notes),
-    };
+    let default = default_interpreter(&config, root, &find, &mut notes, Ask::Version);
 
     let mut folders: Vec<FolderInterpreter> = config
         .folders
         .iter()
         .map(|(key, value)| {
-            let folder = key
-                .trim()
-                .trim_start_matches("./")
-                .trim_end_matches('/')
-                .to_string();
-            let place = format!("folders.\"{key}\"");
-            let interpreter = match folder_problem(&folder) {
-                Some(problem) => Interpreter {
-                    path: None,
-                    source: Source::Config,
-                    configured: Some(value.clone()),
-                    version: None,
-                    virtual_env: None,
-                    problem: Some(format!("{problem} ({place} in {CONFIG_FILE})")),
-                },
-                None => {
-                    if !root.join(&folder).is_dir() {
-                        notes.push(format!(
-                            "The folder {folder} named in {CONFIG_FILE} does not exist yet."
-                        ));
-                    }
-                    configured(value, root, &find, &place)
-                }
-            };
+            let folder = folder_of(key);
+            if folder_problem(&folder).is_none() && !root.join(&folder).is_dir() {
+                notes.push(format!(
+                    "The folder {folder} named in {CONFIG_FILE} does not exist yet."
+                ));
+            }
+            let interpreter = folder_interpreter(key, &folder, value, root, &find);
             FolderInterpreter {
                 folder,
                 interpreter,
@@ -190,6 +170,138 @@ fn python_map_with(project: &Project, find: impl Fn(&str) -> Option<PathBuf>) ->
         default,
         folders,
         notes,
+    }
+}
+
+/// The interpreter that runs `file`, a path relative to the project root
+/// with `/`, read from `thelab.toml` alone: the same choice as
+/// `PythonMap::interpreter_for`, but only the interpreter chosen is asked
+/// for its version, so that a slow one set for some other folder delays
+/// nothing.
+pub fn interpreter_for_file(root: &Path, file: &str) -> crate::Result<ChosenInterpreter> {
+    let root = crate::scan::project_root(root)?;
+    let config = crate::scan::read_config(&root)?;
+    let config = config.python.unwrap_or_default();
+    Ok(interpreter_for_file_with(
+        &root,
+        &config,
+        file,
+        find_program,
+    ))
+}
+
+/// The interpreter for one file, and the folder that chose it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChosenInterpreter {
+    /// The project root, resolved.
+    pub root: PathBuf,
+    /// The `[python.folders]` entry that chose it; `None` for the default.
+    pub folder: Option<String>,
+    pub interpreter: Interpreter,
+}
+
+fn interpreter_for_file_with(
+    root: &Path,
+    config: &PythonConfig,
+    file: &str,
+    find: impl Fn(&str) -> Option<PathBuf>,
+) -> ChosenInterpreter {
+    let file = file.trim_start_matches("./");
+    // As in `interpreter_for`: the longest folder that holds the file, and
+    // of keys that name the same folder, the last.
+    let claimed = config
+        .folders
+        .iter()
+        .map(|(key, value)| (key, folder_of(key), value))
+        .filter(|(_, folder, _)| {
+            file.strip_prefix(folder.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+        })
+        .max_by_key(|(_, folder, _)| folder.len());
+    let (folder, interpreter) = match claimed {
+        Some((key, folder, value)) => {
+            let interpreter = folder_interpreter(key, &folder, value, root, &find);
+            (Some(folder), interpreter)
+        }
+        None => (
+            None,
+            default_interpreter(config, root, &find, &mut Vec::new(), Ask::Version),
+        ),
+    };
+    ChosenInterpreter {
+        root: root.to_path_buf(),
+        folder,
+        interpreter,
+    }
+}
+
+/// The project's own interpreter, for a program started in the project
+/// that should find it first on its PATH (Claude Code): `[python]
+/// interpreter`, else the one detected. It is found but not run, since
+/// asking for its version would only delay the start. `None` when
+/// `thelab.toml` has no `[python]` section.
+pub fn project_interpreter(root: &Path) -> crate::Result<Option<Interpreter>> {
+    let root = crate::scan::project_root(root)?;
+    let Some(config) = crate::scan::read_config(&root)?.python else {
+        return Ok(None);
+    };
+    Ok(Some(default_interpreter(
+        &config,
+        &root,
+        &find_program,
+        &mut Vec::new(),
+        Ask::Nothing,
+    )))
+}
+
+/// Whether an interpreter that was found is also asked for its version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    Version,
+    Nothing,
+}
+
+/// The interpreter for every file outside the configured folders.
+fn default_interpreter(
+    config: &PythonConfig,
+    root: &Path,
+    find: &impl Fn(&str) -> Option<PathBuf>,
+    notes: &mut Vec<String>,
+    ask: Ask,
+) -> Interpreter {
+    match &config.interpreter {
+        Some(value) => configured(value, root, find, "interpreter", ask),
+        None => detect(root, find, notes, ask),
+    }
+}
+
+/// A `[python.folders]` key as a folder: no `./` before it, no `/` after.
+fn folder_of(key: &str) -> String {
+    key.trim()
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// The interpreter of the `[python.folders]` entry `key = value`.
+fn folder_interpreter(
+    key: &str,
+    folder: &str,
+    value: &str,
+    root: &Path,
+    find: &impl Fn(&str) -> Option<PathBuf>,
+) -> Interpreter {
+    let place = format!("folders.\"{key}\"");
+    match folder_problem(folder) {
+        Some(problem) => Interpreter {
+            path: None,
+            source: Source::Config,
+            configured: Some(value.to_string()),
+            version: None,
+            virtual_env: None,
+            problem: Some(format!("{problem} ({place} in {CONFIG_FILE})")),
+        },
+        None => configured(value, root, find, &place, Ask::Version),
     }
 }
 
@@ -211,6 +323,7 @@ fn configured(
     root: &Path,
     find: &impl Fn(&str) -> Option<PathBuf>,
     place: &str,
+    ask: Ask,
 ) -> Interpreter {
     let value = value.trim();
     let unusable = |problem: String| Interpreter {
@@ -246,7 +359,7 @@ fn configured(
     if !is_executable(&path) {
         return unusable(format!("{} is not executable", path.display()));
     }
-    let mut interpreter = probe(path, Source::Config);
+    let mut interpreter = probe(path, Source::Config, ask);
     interpreter.configured = Some(value.to_string());
     if let Some(problem) = interpreter.problem.take() {
         interpreter.problem = Some(format!("{problem} ({place} in {CONFIG_FILE})"));
@@ -259,11 +372,12 @@ fn detect(
     root: &Path,
     find: &impl Fn(&str) -> Option<PathBuf>,
     notes: &mut Vec<String>,
+    ask: Ask,
 ) -> Interpreter {
     for folder in VENV_FOLDERS {
         let python = root.join(folder).join("bin/python");
         if is_executable(&python) {
-            return probe(python, Source::Venv);
+            return probe(python, Source::Venv, ask);
         }
         if root.join(folder).join("pyvenv.cfg").is_file() {
             notes.push(format!(
@@ -272,7 +386,7 @@ fn detect(
         }
     }
     match find("python3") {
-        Some(python) => probe(python, Source::Path),
+        Some(python) => probe(python, Source::Path, ask),
         None => Interpreter {
             path: None,
             source: Source::Path,
@@ -284,11 +398,14 @@ fn detect(
     }
 }
 
-/// Asks an interpreter for its version.
-fn probe(path: PathBuf, source: Source) -> Interpreter {
-    let (version, problem) = match version_of(&path) {
-        Ok(version) => (Some(version), None),
-        Err(problem) => (None, Some(problem)),
+/// An interpreter found at `path`, asked for its version if `ask` says so.
+fn probe(path: PathBuf, source: Source, ask: Ask) -> Interpreter {
+    let (version, problem) = match ask {
+        Ask::Nothing => (None, None),
+        Ask::Version => match version_of(&path) {
+            Ok(version) => (Some(version), None),
+            Err(problem) => (None, Some(problem)),
+        },
     };
     Interpreter {
         virtual_env: virtual_env(&path).map(|venv| venv.display().to_string()),
@@ -611,6 +728,93 @@ mod tests {
         let (folder, interpreter) = map.interpreter_for("sim/run.py");
         assert_eq!(folder, Some("sim"));
         assert!(interpreter.problem.is_some());
+    }
+
+    #[test]
+    fn one_file_gets_the_interpreter_the_map_gives_it() {
+        let project = Scratch::new("one-file");
+        project.python("bin/py", "Python 3.14.0");
+        project.python("bin/sim", "Python 3.12.4");
+        project.python("bin/ml", "Python 3.13.1");
+        project.write(
+            "thelab.toml",
+            "[python]\ninterpreter = \"bin/py\"\n\n[python.folders]\n\
+             \"sim\" = \"bin/sim\"\n\"./src/ml/\" = \"bin/ml\"\n\"src\" = \"bin/py\"\n\
+             \"broken\" = \"bin/missing\"\n\"../outside\" = \"bin/py\"\n",
+        );
+        let scanned = scan(&project.0, None).unwrap();
+        let map = python_map_with(&scanned, nothing);
+        let config = scanned.config.python.clone().unwrap();
+
+        for file in [
+            "src/ml/train.py",
+            "src/ml/deep/net.py",
+            "src/processing.py",
+            "sim/run.py",
+            "./sim/run.py",
+            "simulation/run.py",
+            "broken/run.py",
+            "run.py",
+        ] {
+            let chosen = interpreter_for_file_with(&project.0, &config, file, nothing);
+            let (folder, interpreter) = map.interpreter_for(file);
+            assert_eq!(chosen.folder.as_deref(), folder, "{file}");
+            assert_eq!(&chosen.interpreter, interpreter, "{file}");
+            assert_eq!(chosen.root, project.0);
+        }
+        let chosen = interpreter_for_file(&project.0, "sim/run.py").unwrap();
+        assert_eq!(chosen.interpreter.version.as_deref(), Some("3.12.4"));
+    }
+
+    #[test]
+    fn the_project_interpreter_is_found_without_being_run() {
+        let project = Scratch::new("project-interpreter");
+        // Not Python at all: asking it would be a problem.
+        let python = project.python("envs/main/bin/python", "hello");
+        project.write("envs/main/pyvenv.cfg", "home = /usr/bin\n");
+        project.python(".venv/bin/python", "hello");
+        project.write(".venv/pyvenv.cfg", "home = /usr/bin\n");
+
+        // No [python]: thelab.toml has nothing to say.
+        assert_eq!(project_interpreter(&project.0).unwrap(), None);
+        project.write("thelab.toml", "main = \"main.tex\"\n");
+        assert_eq!(project_interpreter(&project.0).unwrap(), None);
+
+        project.write(
+            "thelab.toml",
+            "[python]\ninterpreter = \"envs/main/bin/python\"\n",
+        );
+        let found = project_interpreter(&project.0).unwrap().unwrap();
+        assert_eq!(found.path, Some(python.display().to_string()));
+        assert_eq!(found.source, Source::Config);
+        assert_eq!(
+            found.virtual_env,
+            Some(project.0.join("envs/main").display().to_string())
+        );
+        assert_eq!((found.version, found.problem), (None, None));
+
+        // [python] with folders only: the default is detected.
+        project.write(
+            "thelab.toml",
+            "[python.folders]\n\"sim\" = \"envs/main/bin/python\"\n",
+        );
+        let found = project_interpreter(&project.0).unwrap().unwrap();
+        assert_eq!(found.source, Source::Venv);
+        assert_eq!(
+            found.virtual_env,
+            Some(project.0.join(".venv").display().to_string())
+        );
+
+        project.write(
+            "thelab.toml",
+            "[python]\ninterpreter = \"envs/gone/bin/python\"\n",
+        );
+        let found = project_interpreter(&project.0).unwrap().unwrap();
+        assert_eq!(found.path, None);
+        assert!(found.problem.unwrap().contains("does not exist"));
+
+        project.write("thelab.toml", "[python]\ninterpreters = \"x\"\n");
+        assert!(project_interpreter(&project.0).is_err());
     }
 
     #[test]
