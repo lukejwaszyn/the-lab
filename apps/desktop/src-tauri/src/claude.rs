@@ -2626,8 +2626,13 @@ const THE_LAB_SYSTEM_PROMPT: &str = concat!(
     "citations (\\cite), cross-references (\\label, \\ref), and BibTeX for bibliographies.\n",
     "6. SKILLS: If scientific skills are installed in .claude/skills/, follow their guidelines ",
     "for domain-specific tasks. Use skill-provided LaTeX packages (.sty) and code patterns.\n",
-    "7. PYTHON: If a .venv/ exists in the project, it is already activated. ",
-    "Use `uv pip install` to add packages and `python` to run scripts."
+    "7. PYTHON: thelab.toml sets the interpreter that runs each folder (`[python] interpreter` for the ",
+    "project, `[python.folders]` for a folder and what is in it), and `thelab python` lists them. ",
+    "Run a script with its folder's interpreter, by the full path listed, since a bare `python` may be ",
+    "another interpreter or none. Without a [python] section, the project's .venv/, if there is one, ",
+    "is the interpreter and is activated in your shell. Ask the user before installing a package; then ",
+    "install it with that interpreter (`<interpreter> -m pip install <package>`), not with `uv pip` or ",
+    "`uv sync`, which can pick another environment. Do not create a virtual environment unless the user asks."
 );
 
 /// Common CLI flags shared across all Claude invocations.
@@ -4620,8 +4625,27 @@ mod tests {
         assert!(prompt.contains("Change files only when the user asks you to"));
         assert!(prompt.contains("small steps"));
         assert!(prompt.contains("Never invent citations"));
-        assert!(prompt.contains(".venv/"));
         assert!(!prompt.contains("PLANNING FIRST"));
+    }
+
+    /// Rule 7 says what `python_env` does: thelab.toml's interpreters win
+    /// over a stray `.venv`, which is activated only without `[python]`.
+    /// The old rule called any `.venv` activated and sent installs to
+    /// `uv pip`, whose own lookup finds that `.venv` again.
+    #[test]
+    fn test_system_prompt_python_rule_follows_thelab_toml() {
+        let prompt = THE_LAB_SYSTEM_PROMPT;
+        let rule = &prompt[prompt.find("7. PYTHON:").expect("rule 7")..];
+        assert!(rule.contains("thelab.toml"), "{rule}");
+        assert!(rule.contains("`thelab python`"), "{rule}");
+        assert!(rule.contains("full path"), "{rule}");
+        assert!(rule.contains("Without a [python] section"), "{rule}");
+        assert!(rule.contains("Ask the user before installing"), "{rule}");
+        assert!(rule.contains("-m pip install"), "{rule}");
+        assert!(rule.contains("not with `uv pip`"), "{rule}");
+        assert!(!rule.contains("If a .venv/ exists"), "{rule}");
+        assert!(!rule.contains("Use `uv pip install`"), "{rule}");
+        assert!(!rule.contains("`python` to run scripts"), "{rule}");
     }
 
     #[test]
