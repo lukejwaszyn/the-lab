@@ -30,6 +30,7 @@ import {
 } from "@/lib/template-registry";
 import { TemplateGallery } from "@/components/template-gallery";
 import { DEFAULT_CLAUDE_MD } from "@/lib/default-claude-md";
+import { firstDraftPrompt, wantsFirstDraft } from "@/lib/first-draft";
 import {
   buildReferenceFilesSection,
   importReferenceFiles,
@@ -78,6 +79,8 @@ export function ProjectWizard({ mode, onBack }: ProjectWizardProps) {
 // ─── Scratch mode form (no template preview) ───
 
 function ScratchForm({ onBack }: { onBack: () => void }) {
+  // The Lab: off by default, so the project starts from the template only.
+  const [draftWithClaude, setDraftWithClaude] = useState(false);
   const [purpose, setPurpose] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
   const [projectFolder, setProjectFolder] = useState<string | null>(null);
@@ -230,26 +233,13 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
           ? await importReferenceFiles(projectPath, attachments)
           : [];
 
-      if (purpose.trim()) {
-        const attachmentSection = buildReferenceFilesSection(referenceFiles);
-
-        const prompt = [
-          `## New ${template.name} Project`,
-          "",
-          `**Template:** \`${template.documentClass}\`  `,
-          `**File:** \`${template.mainFileName}\``,
-          "",
-          `> The file currently contains only the LaTeX preamble (packages, styling, custom commands) with an empty document body.`,
-          "",
-          `### What I want to create`,
-          "",
-          purpose.trim(),
-          attachmentSection,
-          `### Instructions`,
-          "",
-          `Please generate the full document content based on my description. Keep the existing preamble and fill in the document body (between \`\\begin{document}\` and \`\\end{document}\`) with appropriate title, author, sections, and content. Make it a complete, well-structured **${template.name.toLowerCase()}** ready for me to refine.`,
-        ].join("\n");
-
+      const prompt = firstDraftPrompt({
+        draftWithClaude,
+        purpose,
+        template,
+        attachmentSection: buildReferenceFilesSection(referenceFiles),
+      });
+      if (prompt) {
         useClaudeChatStore.getState().newSession();
         useClaudeChatStore.getState().setPendingInitialPrompt(prompt);
       }
@@ -315,25 +305,42 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
             )}
           </div>
 
-          {/* Purpose */}
+          {/* AI first draft: opt-in */}
           <div className="space-y-2.5">
-            <div>
-              <span className="font-semibold text-sm">
-                What are you writing?
+            <label className="flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                checked={draftWithClaude}
+                onChange={(e) => {
+                  setDraftWithClaude(e.target.checked);
+                  if (e.target.checked) {
+                    setTimeout(() => textareaRef.current?.focus(), 0);
+                  }
+                }}
+                className="mt-0.5 size-4 shrink-0 accent-primary"
+              />
+              <span>
+                <span className="font-semibold text-sm">
+                  Draft a first version with Claude
+                </span>
+                <span className="mt-0.5 block text-muted-foreground text-xs leading-relaxed">
+                  Off: the project starts from the template and you write it.
+                  On: describe the document and Claude drafts it for you to
+                  revise, asking before it writes the file.
+                </span>
               </span>
-              <p className="mt-0.5 text-muted-foreground text-xs leading-relaxed">
-                Describe your document and Claude will generate tailored
-                content.
-              </p>
-            </div>
-            <Textarea
-              ref={textareaRef}
-              placeholder="e.g., A research paper on transformer architectures for protein structure prediction, targeting NeurIPS 2025..."
-              value={purpose}
-              onChange={(e) => setPurpose(e.target.value)}
-              rows={4}
-              className="resize-none rounded-xl border-border/60 bg-card/30 text-sm leading-relaxed placeholder:text-muted-foreground/50 focus-visible:bg-card/50"
-            />
+            </label>
+            {draftWithClaude && (
+              <Textarea
+                ref={textareaRef}
+                aria-label="What are you writing?"
+                placeholder="What are you writing? e.g., A research paper on transformer architectures for protein structure prediction, targeting NeurIPS 2025..."
+                value={purpose}
+                onChange={(e) => setPurpose(e.target.value)}
+                rows={4}
+                className="resize-none rounded-xl border-border/60 bg-card/30 text-sm leading-relaxed placeholder:text-muted-foreground/50 focus-visible:bg-card/50"
+              />
+            )}
           </div>
 
           {/* Collapsible sections */}
@@ -478,10 +485,10 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
                   <Loader2Icon className="size-4 animate-spin" />
                   Creating project...
                 </>
-              ) : purpose.trim() ? (
+              ) : wantsFirstDraft(draftWithClaude, purpose) ? (
                 <>
                   <SparklesIcon className="size-4" />
-                  Create & Generate with AI
+                  Create & Draft with Claude
                 </>
               ) : (
                 "Create Project"
