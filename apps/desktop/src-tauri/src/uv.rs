@@ -370,6 +370,20 @@ pub async fn install_uv(window: WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// The project's `.venv`, if it has one with a Python in it. Looks only: it
+/// creates nothing and touches nothing, so it is safe when a project opens.
+/// `setup_project_venv` makes the venv, and only the uv dialog calls it.
+#[tauri::command]
+pub fn project_venv_status(project_path: String) -> Option<VenvInfo> {
+    let venv_dir = Path::new(&project_path).join(".venv");
+    let python = venv_python(&venv_dir);
+    python.exists().then(|| VenvInfo {
+        venv_path: venv_dir.to_string_lossy().to_string(),
+        python_path: python.to_string_lossy().to_string(),
+        created: false,
+    })
+}
+
 #[tauri::command]
 pub async fn setup_project_venv(project_path: String) -> Result<VenvInfo, String> {
     let project = std::path::Path::new(&project_path);
@@ -501,4 +515,35 @@ pub async fn uv_run_command(
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         exit_code,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looking_at_a_project_without_a_venv_creates_none() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().to_string_lossy().to_string();
+
+        assert!(project_venv_status(path).is_none());
+        assert!(!project.path().join(".venv").exists());
+    }
+
+    #[test]
+    fn a_venv_with_a_python_is_reported_as_it_is() {
+        let project = tempfile::tempdir().unwrap();
+        let python = venv_python(&project.path().join(".venv"));
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(&python, "").unwrap();
+
+        let info = project_venv_status(project.path().to_string_lossy().to_string()).unwrap();
+        assert_eq!(info.python_path, python.to_string_lossy());
+        assert!(!info.created);
+        // Nothing was added: no pip shim, no ensurepip.
+        let bin: Vec<_> = std::fs::read_dir(python.parent().unwrap())
+            .unwrap()
+            .collect();
+        assert_eq!(bin.len(), 1);
+    }
 }

@@ -647,6 +647,7 @@ pub fn run() {
             skills::get_skill_content,
             uv::check_uv_status,
             uv::install_uv,
+            uv::project_venv_status,
             uv::setup_project_venv,
             uv::uv_add_packages,
             uv::uv_run_command,

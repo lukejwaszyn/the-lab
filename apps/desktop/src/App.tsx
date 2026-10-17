@@ -95,21 +95,13 @@ function WorkspaceWithClaude() {
     useClaudeChatStore.getState().resetForProject(projectRoot ?? null);
   }, [projectRoot]);
 
-  // Auto-setup Python venv when project opens
+  // Look at the project's Python environment when it opens, without
+  // creating one: a .venv is made only when the user clicks Setup .venv in
+  // the Python Environment dialog. (ClaudePrism made one on every open, and
+  // a stray .venv shadows the interpreters thelab.toml names.)
   useEffect(() => {
     if (!initialized || !projectRoot) return;
-    const uvStore = useUvSetupStore.getState();
-    uvStore
-      .checkStatus()
-      .then(() => {
-        const { status } = useUvSetupStore.getState();
-        if (status === "ready") {
-          return uvStore.setupVenv(projectRoot);
-        }
-      })
-      .catch((err) => {
-        log.error("Failed to setup Python venv", { error: String(err) });
-      });
+    void useUvSetupStore.getState().refreshVenv(projectRoot);
   }, [initialized, projectRoot]);
 
   // Open the most recent chat when entering a project.

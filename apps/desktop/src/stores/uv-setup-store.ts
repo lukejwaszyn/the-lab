@@ -35,6 +35,11 @@ interface UvSetupState {
   // Actions
   checkStatus: () => Promise<void>;
   install: () => Promise<void>;
+  /** Looks for the project's .venv without creating or changing anything:
+   *  what runs when a project opens. */
+  refreshVenv: (projectPath: string) => Promise<void>;
+  /** Creates the project's .venv with uv. Only the Python Environment
+   *  dialog calls it, when the user clicks Setup .venv. */
   setupVenv: (projectPath: string) => Promise<void>;
 
   // Internal
@@ -90,6 +95,22 @@ export const useUvSetupStore = create<UvSetupState>((set, get) => ({
         status: "error",
         error: err?.message || String(err),
       });
+    }
+  },
+
+  refreshVenv: async (projectPath: string) => {
+    try {
+      const info = await invoke<VenvInfo | null>("project_venv_status", {
+        projectPath,
+      });
+      set({
+        venvReady: !!info,
+        venvPath: info?.venv_path ?? null,
+        pythonPath: info?.python_path ?? null,
+      });
+    } catch (err: any) {
+      log.warn("Failed to look for the project venv", { error: String(err) });
+      set({ venvReady: false, venvPath: null, pythonPath: null });
     }
   },
 
