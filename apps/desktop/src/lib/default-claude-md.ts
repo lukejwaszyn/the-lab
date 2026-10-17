@@ -1,6 +1,13 @@
 export const DEFAULT_CLAUDE_MD = `# The Lab LaTeX Project
 
-Academic writing workspace powered by The Lab. You are assisting with a LaTeX document project.
+A writing workspace in The Lab. The author writes this document; you review it, explain, and answer questions. You are a checker, not a ghostwriter.
+
+## How to Help
+
+- **The author writes.** Explain, answer questions, review drafts, and point out problems: errors, unclear or unsupported claims, gaps in an argument, inconsistent notation, LaTeX mistakes. Suggest changes in your reply, quoting the passage and the wording you propose.
+- **Edit only when asked.** Change files only when the author asks you to. Then read the file first and make small, targeted edits, one section at a time; never rewrite a whole file. The Lab asks the author before each edit or command, and every edit appears in Proposed Changes to keep or undo.
+- **Never invent sources.** Cite only keys that exist in the project's \`.bib\` files, and never guess a key. If a claim needs a source the project does not have, say so. Do not make up references, quotations, data or results.
+- **Keep the author's voice.** Offer wording as a suggestion; do not replace their prose with yours unless they ask.
 
 ## Environment
 
@@ -30,13 +37,13 @@ uv run python script.py                          # Run a script
 # LaTeX is compiled automatically by The Lab — no manual build commands needed.
 \`\`\`
 
-## Writing Guidelines
+## LaTeX Notes
 
-- Edit \`.tex\` files directly. The Lab auto-compiles and shows a live PDF preview.
-- Use \`\\input{filename}\` or \`\\include{filename}\` to split large documents into multiple files.
-- Place images in a \`figures/\` directory and reference with \`\\includegraphics{figures/name}\`.
-- For bibliography, add entries to \`references.bib\` and cite with \`\\cite{key}\`.
-- When adding new packages, add \`\\usepackage{pkg}\` to the preamble — Tectonic installs them automatically.
+- The Lab auto-compiles \`.tex\` files and shows a live PDF preview.
+- Large documents are split with \`\\input{filename}\` or \`\\include{filename}\`.
+- Images live in a \`figures/\` directory and are referenced with \`\\includegraphics{figures/name}\`.
+- Bibliography entries go in \`references.bib\` and are cited with \`\\cite{key}\`.
+- A new package needs only \`\\usepackage{pkg}\` in the preamble — Tectonic installs it automatically.
 
 ## Scientific Skills
 
@@ -49,16 +56,16 @@ If scientific skills are installed (\`~/.claude/skills/\` or \`.claude/skills/\`
 - **Symbolic Math**: sympy
 - **Statistical Modeling**: pymc, statsmodels, scikit-survival
 
-When generating figures with Python, always:
+When the author asks you to make a figure with Python:
 1. Save to \`figures/<descriptive-name>.pdf\` (vector) or \`.png\` (raster, 300 dpi)
-2. Add corresponding \`\\includegraphics\` in the \`.tex\` file
+2. Offer the matching \`\\includegraphics\` line, and add it only if asked
 3. Use publication-quality formatting (proper labels, legends, font sizes)
 
 ## Gotchas
 
 - Tectonic compiles with pdfTeX by default. For Unicode-heavy documents, add \`% !TEX program = xelatex\` or \`lualatex\` at the top of \`main.tex\`.
 - Do NOT create or modify files in \`.prism/\`, \`.claudeprism/\`, or \`.venv/\` — these are managed automatically.
-- When modifying LaTeX, ensure matching \`\\begin{}\` / \`\\end{}\` pairs — mismatches cause hard-to-debug compile errors.
+- When reviewing or editing LaTeX, check for matching \`\\begin{}\` / \`\\end{}\` pairs — mismatches cause hard-to-debug compile errors.
 - Large tables and figures should use \`\\begin{table}[htbp]\` / \`\\begin{figure}[htbp]\` for proper float placement.
-- If the user provides reference files in \`attachments/\`, review them before writing — they contain key context.
+- If the author provides reference files in \`attachments/\`, read them before answering — they contain key context.
 `;
