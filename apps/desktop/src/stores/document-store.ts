@@ -28,7 +28,9 @@ import {
   discardDocxEdits,
   flushDocxEdits,
   hasStashedDocxEdits,
+  moveDocxEdits,
 } from "@/lib/docx/docx-session";
+import { useDocxPrefsStore } from "@/stores/docx-store";
 
 const log = createLogger("document");
 
@@ -42,6 +44,15 @@ export function isTextFileType(type: ProjectFileType): boolean {
   );
 }
 const PROJECT_RENAME_LOCK_RETRY_DELAYS_MS = [150, 300, 600, 1000];
+
+/**
+ * The Lab: Word tabs, their kept edits and their remembered modes follow
+ * a file or folder that moved, so a later save writes where it now is.
+ */
+function followDocxMove(from: string, to: string): void {
+  moveDocxEdits(from, to);
+  useDocxPrefsStore.getState().movePaths(from, to);
+}
 
 export interface ProjectFile {
   id: string; // relativePath is the id
@@ -525,6 +536,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     await sleep(150);
 
     await renameProjectRootWithRetry(oldRoot, newRoot);
+    followDocxMove(oldRoot, newRoot);
     try {
       await invoke("migrate_project_sessions", {
         oldProjectPath: oldRoot,
@@ -736,6 +748,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
       log.error("Failed to rename file on disk", { error: String(e) });
       return;
     }
+    followDocxMove(file.absolutePath, newAbsPath);
     migratePdfBytesKey(id, newRelativePath);
     set((s) => {
       const compileErrorCache = migrateCacheKey(
@@ -1054,6 +1067,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
       throw new Error(`${file.name} could not be saved, so it was not moved.`);
     }
     await renameFileOnDisk(file.absolutePath, newAbsPath);
+    followDocxMove(file.absolutePath, newAbsPath);
 
     const newName = newRelativePath.split(/[/\\]/).pop() || file.name;
     migratePdfBytesKey(fileId, newRelativePath);
@@ -1106,6 +1120,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
       throw new Error("A Word file in the folder could not be saved first.");
     }
     await renameFileOnDisk(oldAbsPath, newAbsPath);
+    followDocxMove(oldAbsPath, newAbsPath);
 
     // Reload project to pick up all new paths
     await state.openProject(state.projectRoot);

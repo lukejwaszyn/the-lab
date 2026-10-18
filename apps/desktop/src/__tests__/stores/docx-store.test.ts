@@ -35,6 +35,18 @@ describe("the Word tab's mode, remembered per file", () => {
     });
   });
 
+  it("follows a file or folder renamed or moved", () => {
+    const { setMode } = useDocxPrefsStore.getState();
+    setMode("/p/sub/a.docx", "suggesting");
+    setMode("/p/b.docx", "viewing");
+    useDocxPrefsStore.getState().movePaths("/p/sub", "/p/renamed");
+    useDocxPrefsStore.getState().movePaths("/p/b.docx", "/p/c.docx");
+    expect(useDocxPrefsStore.getState().modes).toEqual({
+      "/p/renamed/a.docx": "suggesting",
+      "/p/c.docx": "viewing",
+    });
+  });
+
   it("treats anything unknown as Editing", () => {
     expect(modeFor({ "/p/a.docx": "typing" as never }, "/p/a.docx")).toBe(
       "editing",

@@ -216,7 +216,7 @@ const COMMENT_CHANGES = new Set([
 export type CloseResult = "saved" | "kept" | "lost";
 
 export class DocxController implements DocxSession {
-  readonly absolutePath: string;
+  absolutePath: string;
   state: DocxTabState = { ...INITIAL_TAB_STATE };
 
   private readonly options: DocxControllerOptions;
@@ -257,6 +257,11 @@ export class DocxController implements DocxSession {
     return (
       !this.discarded && (this.restored || this.changes !== this.savedChanges)
     );
+  }
+
+  /** Its file was renamed or moved; later saves write it there. */
+  moveTo(absolutePath: string) {
+    this.absolutePath = absolutePath;
   }
 
   private noteChange() {

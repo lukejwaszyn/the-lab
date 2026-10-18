@@ -61,6 +61,9 @@ function wordTab(absolutePath: string, saves = true) {
     discard: vi.fn(() => {
       dirty = false;
     }),
+    moveTo: vi.fn((path: string) => {
+      tab.absolutePath = path;
+    }),
   } satisfies DocxSession;
   registerDocxSession(tab);
   return tab;

@@ -28,6 +28,8 @@ import {
   hasStashedDocxEdits,
   hasUnsavedDocx,
   isAtOrUnder,
+  moveDocxEdits,
+  movedPath,
   registerDocxSession,
   resetDocxSessionsForTest,
   stashDocxEdits,
@@ -48,6 +50,9 @@ function session(absolutePath: string, dirty = true, saves = true) {
     }),
     discard: vi.fn(() => {
       isDirty = false;
+    }),
+    moveTo: vi.fn((path: string) => {
+      s.absolutePath = path;
     }),
     setDirty(next: boolean) {
       isDirty = next;
@@ -152,6 +157,25 @@ describe("Word tabs the app can save", () => {
     a.setDirty(true);
     await flushDocxEdits("/p/a.docx", { explicit: true });
     expect(a.save).toHaveBeenLastCalledWith({ implicit: false });
+  });
+
+  it("moves tabs and their remembered paths with a renamed folder", () => {
+    const a = session("/p/sub/a.docx");
+    const b = session("/p/b.docx");
+    registerDocxSession(a);
+    registerDocxSession(b);
+    kept("/p/sub/c.docx");
+    moveDocxEdits("/p/sub", "/p/renamed");
+    expect(a.moveTo).toHaveBeenCalledWith("/p/renamed/a.docx");
+    expect(b.moveTo).not.toHaveBeenCalled();
+    expect(hasStashedDocxEdits("/p/sub/c.docx")).toBe(false);
+    expect(takeStashedDocxEdits("/p/renamed/c.docx")?.absolutePath).toBe(
+      "/p/renamed/c.docx",
+    );
+    expect(movedPath("/p/a.docx", "/p/a.docx", "/p/b.docx")).toBe("/p/b.docx");
+    expect(movedPath("/p/subway/x.docx", "/p/sub", "/q")).toBe(
+      "/p/subway/x.docx",
+    );
   });
 
   it("drops the edits of tabs whose files are deleted", () => {

@@ -37,6 +37,8 @@ export interface DocxSession {
   save(options?: SaveOptions): Promise<boolean>;
   /** Drops the tab's unsaved edits (its file is being deleted). */
   discard(): void;
+  /** Its file was renamed or moved to `absolutePath`. */
+  moveTo(absolutePath: string): void;
 }
 
 /** A closed Word tab's edits that could not be saved. */
@@ -93,6 +95,14 @@ export function isAtOrUnder(path: string, prefix: string): boolean {
   if (path === prefix) return true;
   const folder = prefix.replace(/[\\/]+$/, "");
   return path.startsWith(`${folder}/`) || path.startsWith(`${folder}\\`);
+}
+
+/** `path` with the folder (or file) `from` replaced by `to`. */
+export function movedPath(path: string, from: string, to: string): string {
+  if (path === from) return to;
+  return isAtOrUnder(path, from)
+    ? to.replace(/[\\/]+$/, "") + path.slice(from.replace(/[\\/]+$/, "").length)
+    : path;
 }
 
 // ─── Edits kept after a failed save ───
@@ -210,6 +220,27 @@ export function discardDocxEdits(path: string): void {
     if (isAtOrUnder(key, path)) stashed.delete(key);
   }
   updateCloseGuard();
+}
+
+/**
+ * Word tabs and kept edits follow a file or folder renamed or moved from
+ * `from` to `to`, so that a later save writes the file where it now is.
+ */
+export function moveDocxEdits(from: string, to: string): void {
+  for (const s of sessions) {
+    if (isAtOrUnder(s.absolutePath, from)) {
+      s.moveTo(movedPath(s.absolutePath, from, to));
+    }
+  }
+  for (const [key, edits] of [...stashed]) {
+    if (!isAtOrUnder(key, from)) continue;
+    const next = movedPath(key, from, to);
+    stashed.delete(key);
+    stashed.set(next, { ...edits, absolutePath: next });
+  }
+  for (const [key, done] of [...closing]) {
+    if (isAtOrUnder(key, from)) closing.set(movedPath(key, from, to), done);
+  }
 }
 
 // ─── Saving before the window closes (and so before the app quits) ───
