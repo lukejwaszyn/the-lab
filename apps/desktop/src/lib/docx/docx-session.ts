@@ -9,7 +9,9 @@
  * edits: the bytes it meant to write are kept here, its file keeps its
  * dot, and opening the file again shows those edits, unsaved. The same
  * happens when the file changed on disk and the tab was still asking
- * whether to reload: no save made on the way out overwrites that change.
+ * whether to reload, and when only rewriting the whole file could save
+ * it: no save made on the way out overwrites that change or rewrites the
+ * file unasked.
  *
  * Nothing here loads SuperDoc.
  */
@@ -24,9 +26,12 @@ export interface SaveOptions {
   /**
    * The save was asked for by a pause in editing, leaving the tab,
    * renaming or closing, not by ⌘S: it does not overwrite a change made
-   * on disk that the tab has not been told to keep or drop.
+   * on disk that the tab has not been told to keep or drop, and it never
+   * rewrites the whole file.
    */
   implicit?: boolean;
+  /** The user agreed that this save may rewrite the whole file. */
+  wholeFile?: boolean;
 }
 
 export interface DocxSession {
@@ -52,6 +57,11 @@ export interface StashedDocxEdits {
   reason: string;
   /** The file changed on disk, and the tab had not been told what to do. */
   conflict: boolean;
+  /**
+   * Only rewriting the whole file could save them (`preserve.ts` could not
+   * keep the unedited parts), which only ⌘S may do, after asking.
+   */
+  wholeFile?: boolean;
 }
 
 /** What `docx_file_state` says about a file on disk (`docx.rs`). */
@@ -129,7 +139,7 @@ export function hasStashedDocxEdits(path: string): boolean {
 
 /** Writes kept edits; false when they are still unsaved. */
 async function saveStashed(edits: StashedDocxEdits): Promise<boolean> {
-  if (edits.conflict) return false;
+  if (edits.conflict || edits.wholeFile) return false;
   try {
     const disk = await fileState(edits.absolutePath);
     if (
@@ -271,8 +281,9 @@ function withTimeout<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
 /**
  * The window's close request (its close button, ⌘W, or The Lab's Quit)
  * saves the unsaved Word tabs first. If one cannot be saved (a failed
- * save, or a change on disk the tab is still asking about), the window
- * stays open once, saying so; a second close discards.
+ * save, a change on disk the tab is still asking about, or a save that
+ * would rewrite the whole file), the window stays open once, saying so;
+ * a second close discards.
  */
 async function onCloseRequested(event: { preventDefault(): void }) {
   if (closeAnyway || !hasUnsavedDocx()) return;

@@ -223,6 +223,14 @@ describe("edits kept after a failed save", () => {
     expect(written).toHaveLength(0);
   });
 
+  it("are not written when only a whole rewrite could save them", async () => {
+    disk["/p/a.docx"] = 1000;
+    kept("/p/a.docx", { wholeFile: true });
+    expect(await flushDocxEdits()).toBe(false);
+    expect(written).toHaveLength(0);
+    expect(hasStashedDocxEdits("/p/a.docx")).toBe(true);
+  });
+
   it("stay kept when the save fails again", async () => {
     disk["/p/a.docx"] = 1000;
     saveFails = true;

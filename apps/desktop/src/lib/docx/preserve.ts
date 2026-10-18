@@ -21,9 +21,10 @@
  * the ids the saved file uses.
  *
  * When the mapping cannot be trusted, or the result would not hold
- * together (a relationship, comment or note it names is missing), the save
- * falls back to SuperDoc's whole export, which is what SuperDoc alone would
- * have written, with its comments repaired.
+ * together (a relationship, comment or note it names is missing), the
+ * result is SuperDoc's whole export, with its comments repaired, marked
+ * `preserved: false`. That rewrites what was not edited, so the tab asks
+ * before writing it (`docx-controller.ts`).
  */
 import { strFromU8, strToU8, unzipSync, zipSync, type Zippable } from "fflate";
 import {

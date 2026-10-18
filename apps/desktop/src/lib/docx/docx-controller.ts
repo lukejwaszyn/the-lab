@@ -5,8 +5,10 @@
  * change made elsewhere reloads a tab with no unsaved edits and asks about
  * one with them, and Word's owner file beside it means Word has it open.
  *
- * It saves on ⌘S, after a pause in editing, and when the tab closes. No
- * save writes over a change made on disk that the tab has not shown.
+ * It saves on ⌘S, after a pause in editing, and when the tab closes. Only
+ * ⌘S may rewrite the whole file, when the unedited parts cannot be kept,
+ * and only after asking; no save writes over a change made on disk that
+ * the tab has not shown.
  */
 import { readFile } from "@tauri-apps/plugin-fs";
 import type { SuperDoc } from "superdoc";
@@ -39,6 +41,10 @@ export const OPEN_IN_WORD_NOTE =
   "This file is open in Word. Editing it in both places will conflict.";
 export const READ_ONLY_NOTE =
   "This file is read-only, so it opens for reading only.";
+export const WHOLE_FILE_QUESTION =
+  "This save has to rewrite the whole file, which can change its formatting. Save anyway, or Cancel and keep editing.";
+export const WHOLE_FILE_HELD_NOTE =
+  "Not saved: The Lab can save this file only by rewriting all of it, which can change its formatting. Your edits are kept here. Press ⌘S to choose.";
 export const KEPT_EDITS_NOTE =
   "These are your unsaved edits from before. They have not been saved yet.";
 
@@ -57,6 +63,12 @@ export interface DocxTabState {
   readOnly: boolean;
   /** An edit inside an equation was refused. */
   equationNote: boolean;
+  /**
+   * Only rewriting the whole file can save the edits (`preserve.ts` could
+   * not keep the unedited parts): ⌘S asks first ("ask"); a save the user
+   * did not ask for keeps them unsaved and says so ("held").
+   */
+  wholeFile: "ask" | "held" | null;
   /** The tab shows edits kept from an earlier failed save. */
   restored: boolean;
 }
@@ -71,6 +83,7 @@ export const INITIAL_TAB_STATE: DocxTabState = {
   openInWord: false,
   readOnly: false,
   equationNote: false,
+  wholeFile: null,
   restored: false,
 };
 
@@ -262,6 +275,12 @@ export class DocxController implements DocxSession {
   private savedChanges = 0;
   /** The tab shows edits kept from a failed save, not yet written. */
   private restored = false;
+  /**
+   * The bytes the tab shows are SuperDoc's whole export (edits kept when
+   * only rewriting the whole file could save them), so any save of them
+   * rewrites the whole file.
+   */
+  private wholeBase = false;
   /** What the last failed save meant to write. */
   private unsaved: SaveBytes | null = null;
   private knownModifiedMs: number | null = null;
@@ -329,6 +348,7 @@ export class DocxController implements DocxSession {
     this.changes = 0;
     this.savedChanges = 0;
     this.restored = false;
+    this.wholeBase = false;
     this.unsaved = null;
     this.update({ ...INITIAL_TAB_STATE });
     let kept: StashedDocxEdits | null = null;
@@ -459,18 +479,21 @@ export class DocxController implements DocxSession {
       }
       if (kept) {
         this.restored = true;
-        const reason = kept.conflict ? null : kept.reason;
+        this.wholeBase = kept.wholeFile === true;
+        const reason = kept.conflict || kept.wholeFile ? null : kept.reason;
         const changedSince =
           disk.exists &&
           disk.modifiedMs != null &&
           kept.knownModifiedMs != null &&
           disk.modifiedMs !== kept.knownModifiedMs;
+        const wholeFile = this.wholeBase ? "held" : null;
         kept = null;
         this.update({
           phase: "ready",
           dirty: true,
           restored: true,
           changedOnDisk: changedSince,
+          wholeFile,
           saveError: reason ? `Not saved: ${reason}` : null,
         });
       } else {
@@ -570,17 +593,28 @@ export class DocxController implements DocxSession {
    * it shows it instead (Reload or Keep mine). An implicit save (a pause
    * in editing, leaving the tab, renaming, closing the window) also does
    * not write over a change the tab is still asking about, which ⌘S does,
-   * as Keep mine would.
+   * as Keep mine would, and it never rewrites the whole file.
    */
   async save(options: SaveOptions = {}): Promise<boolean> {
     while (this.saving) await this.saving;
     if (!this.isDirty()) return true;
     if (options.implicit && this.state.changedOnDisk) return false;
-    const saving = this.saveNow().finally(() => {
+    const saving = this.saveNow(options).finally(() => {
       if (this.saving === saving) this.saving = null;
     });
     this.saving = saving;
     return saving;
+  }
+
+  /** ⌘S's question answered: rewrite the whole file. */
+  saveWholeFile(): Promise<boolean> {
+    this.update({ wholeFile: null });
+    return this.save({ wholeFile: true });
+  }
+
+  /** ⌘S's question answered: keep editing, unsaved. */
+  keepEditing(): void {
+    if (this.state.wholeFile === "ask") this.update({ wholeFile: "held" });
   }
 
   /** The bytes a save writes now: SuperDoc's export, unchanged parts kept. */
@@ -601,17 +635,19 @@ export class DocxController implements DocxSession {
           changedParts: [],
         };
     if (!result.preserved) {
-      log.warn("Saved SuperDoc's whole export", { reason: result.reason });
+      log.warn("Only SuperDoc's whole export can save this file", {
+        reason: result.reason,
+      });
     }
     return {
       bytes: result.bytes,
       edited,
-      whole: !result.preserved,
+      whole: this.wholeBase || !result.preserved,
       changes,
     };
   }
 
-  private async saveNow(): Promise<boolean> {
+  private async saveNow(options: SaveOptions): Promise<boolean> {
     if (!this.isDirty()) return true;
     if (!this.sd || !this.original) return false;
     this.update({ saving: true, saveError: null });
@@ -626,10 +662,18 @@ export class DocxController implements DocxSession {
         }
       }
       const save = await this.bytesToSave();
+      if (save.whole && !options.wholeFile) {
+        // Ask before rewriting the whole file; a save the user did not
+        // ask for keeps the edits unsaved and says so.
+        const wholeFile =
+          options.implicit && this.state.wholeFile !== "ask" ? "held" : "ask";
+        this.update({ saving: false, wholeFile });
+        return false;
+      }
       if (!this.restored && sameBytes(save.bytes, this.original)) {
         // Edited and edited back: the file is already what it should be.
         this.savedChanges = save.changes;
-        this.update({ saving: false, dirty: this.isDirty() });
+        this.update({ saving: false, dirty: this.isDirty(), wholeFile: null });
         return !this.isDirty();
       }
       this.unsaved = save;
@@ -638,6 +682,7 @@ export class DocxController implements DocxSession {
       this.baseline = save.edited;
       this.unsaved = null;
       this.restored = false;
+      this.wholeBase = false;
       this.knownModifiedMs = disk.modifiedMs;
       this.savedChanges = save.changes;
       this.update({
@@ -645,6 +690,7 @@ export class DocxController implements DocxSession {
         dirty: this.isDirty(),
         changedOnDisk: false,
         restored: false,
+        wholeFile: null,
         openInWord: disk.openInWord,
       });
       return !this.isDirty();
@@ -777,9 +823,12 @@ export class DocxController implements DocxSession {
       knownModifiedMs: this.knownModifiedMs,
       reason: conflict
         ? "the file changed on disk while it had unsaved edits"
-        : (this.state.saveError?.replace(/^Not saved: /, "") ??
-          "the save failed"),
+        : save.whole
+          ? "saving it would rewrite the whole file"
+          : (this.state.saveError?.replace(/^Not saved: /, "") ??
+            "the save failed"),
       conflict,
+      wholeFile: save.whole,
     });
     return "kept";
   }

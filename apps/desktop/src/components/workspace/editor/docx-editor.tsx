@@ -7,6 +7,14 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { APP_VISIBILITY_RESTORED } from "@/lib/debug/log-store";
 import {
@@ -16,6 +24,8 @@ import {
   KEPT_EDITS_NOTE,
   OPEN_IN_WORD_NOTE,
   READ_ONLY_NOTE,
+  WHOLE_FILE_HELD_NOTE,
+  WHOLE_FILE_QUESTION,
   type DocxTabState,
 } from "@/lib/docx/docx-controller";
 import { registerDocxSession, updateCloseGuard } from "@/lib/docx/docx-session";
@@ -106,7 +116,9 @@ export function DocxEditor({ file }: { file: ProjectFile }) {
           toast.warning(
             closing.state.changedOnDisk
               ? `${file.name} changed on disk while you had unsaved edits, so they were not saved over it. Open it again to choose Reload or Keep mine.`
-              : `${file.name} could not be saved. Your edits are kept: open it again to save them. ${closing.state.saveError ?? ""}`,
+              : closing.state.wholeFile
+                ? `${file.name} was not saved, because saving it would rewrite the whole file. Your edits are kept: open it again and press ⌘S to choose.`
+                : `${file.name} could not be saved. Your edits are kept: open it again to save them. ${closing.state.saveError ?? ""}`,
           );
         } else if (result === "lost") {
           toast.error(
@@ -200,6 +212,14 @@ export function DocxEditor({ file }: { file: ProjectFile }) {
       )}
       {state.restored && <Banner tone="warning">{KEPT_EDITS_NOTE}</Banner>}
       {state.saveError && <Banner tone="error">{state.saveError}</Banner>}
+      {state.wholeFile === "held" && state.dirty && (
+        <Banner tone="warning">{WHOLE_FILE_HELD_NOTE}</Banner>
+      )}
+      <WholeFileQuestion
+        open={state.wholeFile === "ask"}
+        onSave={() => void controllerRef.current?.saveWholeFile()}
+        onCancel={() => controllerRef.current?.keepEditing()}
+      />
       <div className="relative min-h-0 flex-1">
         <div
           ref={editorRef}
@@ -230,6 +250,42 @@ export function DocxEditor({ file }: { file: ProjectFile }) {
         )}
       </div>
     </div>
+  );
+}
+
+/** ⌘S could not keep the unedited parts: rewrite the whole file? */
+function WholeFileQuestion({
+  open,
+  onSave,
+  onCancel,
+}: {
+  open: boolean;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  return (
+    <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
+      <DialogContent
+        showCloseButton={false}
+        onOpenAutoFocus={(event) => {
+          // Return and Space keep editing; only a click rewrites the file.
+          event.preventDefault();
+          cancelRef.current?.focus();
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle>Save the whole file?</DialogTitle>
+          <DialogDescription>{WHOLE_FILE_QUESTION}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button ref={cancelRef} variant="outline" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button onClick={onSave}>Save anyway</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

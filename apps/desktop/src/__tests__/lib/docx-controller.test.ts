@@ -157,6 +157,18 @@ function slowNextSave() {
   return () => release();
 }
 
+/** The next preserving save cannot keep the unedited parts. */
+function wholeFileOnly() {
+  vi.mocked(preserveUnchanged).mockImplementationOnce(
+    (_o: Uint8Array, _b: Uint8Array, e: Uint8Array) => ({
+      bytes: e,
+      preserved: false,
+      reason: "the blocks do not match",
+      changedParts: ["(the whole file)"],
+    }),
+  );
+}
+
 /** A tab opened with real timers, then the autosave's timeouts faked. */
 async function openWithFakeTimers(
   options: Partial<ConstructorParameters<typeof DocxController>[0]> = {},
@@ -474,6 +486,16 @@ describe("saving after a pause in editing", () => {
     expect(controller.isDirty()).toBe(false);
   });
 
+  it("never rewrites the whole file; it keeps the edits and says so", async () => {
+    const { controller } = await openWithFakeTimers();
+    last().transact();
+    wholeFileOnly();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+    await until(() => controller.state.wholeFile === "held");
+    expect(saves).toHaveLength(0);
+    expect(controller.isDirty()).toBe(true);
+  });
+
   it("stops when the tab closes", async () => {
     const { controller } = await openWithFakeTimers();
     last().transact();
@@ -482,6 +504,35 @@ describe("saving after a pause in editing", () => {
     await vi.advanceTimersByTimeAsync(AUTOSAVE_MS * 3);
     await settle();
     expect(saves).toHaveLength(1);
+  });
+});
+
+describe("a save that would rewrite the whole file", () => {
+  it("asks on Cmd+S, and writes only on Save anyway", async () => {
+    const { controller } = makeController();
+    await controller.open();
+    last().transact();
+    wholeFileOnly();
+    expect(await controller.save()).toBe(false);
+    expect(controller.state.wholeFile).toBe("ask");
+    expect(saves).toHaveLength(0);
+    // An implicit save meanwhile neither writes nor drops the question.
+    wholeFileOnly();
+    expect(await controller.save({ implicit: true })).toBe(false);
+    expect(controller.state.wholeFile).toBe("ask");
+
+    controller.keepEditing();
+    expect(controller.state.wholeFile).toBe("held");
+    expect(saves).toHaveLength(0);
+
+    wholeFileOnly();
+    expect(await controller.save()).toBe(false);
+    expect(controller.state.wholeFile).toBe("ask");
+    wholeFileOnly();
+    expect(await controller.saveWholeFile()).toBe(true);
+    expect(saves).toHaveLength(1);
+    expect(controller.state.wholeFile).toBeNull();
+    expect(controller.isDirty()).toBe(false);
   });
 });
 
@@ -545,6 +596,29 @@ describe("closing with edits a save could not write", () => {
     await b.open();
     expect(b.state.changedOnDisk).toBe(true);
     expect(b.state.restored).toBe(true);
+  });
+
+  it("keeps edits that only a whole rewrite could save, and never writes them unasked", async () => {
+    const a = makeController().controller;
+    await a.open();
+    last().transact();
+    wholeFileOnly(); // the save on close
+    wholeFileOnly(); // the bytes kept
+    expect(await a.close()).toBe("kept");
+    expect(saves).toHaveLength(0);
+    expect(await flushDocxEdits()).toBe(false);
+    expect(saves).toHaveLength(0);
+
+    const b = makeController().controller;
+    await b.open();
+    expect(b.state.restored).toBe(true);
+    expect(b.state.wholeFile).toBe("held");
+    expect(b.state.saveError).toBeNull();
+    // Its bytes are SuperDoc's whole export: Cmd+S asks, even when splicing works.
+    expect(await b.save()).toBe(false);
+    expect(b.state.wholeFile).toBe("ask");
+    expect(await b.saveWholeFile()).toBe(true);
+    expect(saves).toHaveLength(1);
   });
 });
 
