@@ -215,6 +215,17 @@ const COMMENT_CHANGES = new Set([
  */
 export type CloseResult = "saved" | "kept" | "lost";
 
+/** The bytes a save would write, and what they are. */
+interface SaveBytes {
+  bytes: Uint8Array;
+  /** SuperDoc's export they were made from (the next save's baseline). */
+  edited: Uint8Array;
+  /** They are SuperDoc's whole export, not the file with the edits spliced in. */
+  whole: boolean;
+  /** `changes` when they were exported. */
+  changes: number;
+}
+
 export class DocxController implements DocxSession {
   absolutePath: string;
   state: DocxTabState = { ...INITIAL_TAB_STATE };
@@ -232,7 +243,7 @@ export class DocxController implements DocxSession {
   /** The tab shows edits kept from a failed save, not yet written. */
   private restored = false;
   /** What the last failed save meant to write. */
-  private unsaved: Uint8Array | null = null;
+  private unsaved: SaveBytes | null = null;
   private knownModifiedMs: number | null = null;
   private mode: DocxMode;
   private readOnly = false;
@@ -511,32 +522,31 @@ export class DocxController implements DocxSession {
   }
 
   /**
-   * Saves unsaved edits; true when nothing is left unsaved. An implicit
-   * save (leaving the tab, renaming, closing the window) does not write
-   * over a change on disk that the tab is still asking about; ⌘S does,
-   * as Keep mine would.
+   * Saves unsaved edits; true when nothing is left unsaved. One save runs
+   * at a time: a save asked for while one runs waits for it, then saves
+   * what is still unsaved (edits made meanwhile).
+   *
+   * An implicit save (leaving the tab, renaming, closing the window) does
+   * not write over a change on disk that the tab is still asking about;
+   * ⌘S does, as Keep mine would.
    */
-  save(options: SaveOptions = {}): Promise<boolean> {
-    if (options.implicit && this.state.changedOnDisk && this.isDirty()) {
-      return Promise.resolve(false);
-    }
-    if (!this.saving) {
-      this.saving = this.saveNow().finally(() => {
-        this.saving = null;
-      });
-    }
-    return this.saving;
+  async save(options: SaveOptions = {}): Promise<boolean> {
+    while (this.saving) await this.saving;
+    if (!this.isDirty()) return true;
+    if (options.implicit && this.state.changedOnDisk) return false;
+    const saving = this.saveNow().finally(() => {
+      if (this.saving === saving) this.saving = null;
+    });
+    this.saving = saving;
+    return saving;
   }
 
   /** The bytes a save writes now: SuperDoc's export, unchanged parts kept. */
-  private async bytesToSave(): Promise<{
-    bytes: Uint8Array;
-    edited: Uint8Array;
-    whole: boolean;
-  }> {
+  private async bytesToSave(): Promise<SaveBytes> {
     const sd = this.sd;
     const original = this.original;
     if (!sd || !original) throw new Error("The document is not open.");
+    const changes = this.changes;
     const edited = await exportDocx(sd);
     // Loaded with the first save, like SuperDoc on the first open.
     const { preserveUnchanged } = await import("./preserve");
@@ -551,24 +561,28 @@ export class DocxController implements DocxSession {
     if (!result.preserved) {
       log.warn("Saved SuperDoc's whole export", { reason: result.reason });
     }
-    return { bytes: result.bytes, edited, whole: !result.preserved };
+    return {
+      bytes: result.bytes,
+      edited,
+      whole: !result.preserved,
+      changes,
+    };
   }
 
   private async saveNow(): Promise<boolean> {
     if (!this.isDirty()) return true;
     if (!this.sd || !this.original) return false;
-    const changes = this.changes;
     this.update({ saving: true, saveError: null });
     try {
-      const { bytes, edited } = await this.bytesToSave();
-      this.unsaved = bytes;
-      const disk = await saveDocxBytes(this.absolutePath, bytes);
-      this.original = bytes;
-      this.baseline = edited;
+      const save = await this.bytesToSave();
+      this.unsaved = save;
+      const disk = await saveDocxBytes(this.absolutePath, save.bytes);
+      this.original = save.bytes;
+      this.baseline = save.edited;
       this.unsaved = null;
       this.restored = false;
       this.knownModifiedMs = disk.modifiedMs;
-      this.savedChanges = changes;
+      this.savedChanges = save.changes;
       this.update({
         saving: false,
         dirty: this.isDirty(),
@@ -665,10 +679,10 @@ export class DocxController implements DocxSession {
   private async closeNow(): Promise<CloseResult> {
     if (this.closed) return "saved";
     let result: CloseResult = "saved";
-    if (this.isDirty()) {
-      const conflict = this.state.changedOnDisk;
-      const saved = conflict ? false : await this.save({ implicit: true });
-      if (!saved) result = await this.keep(conflict);
+    // A save running (⌘S) finishes first, and what was edited after it
+    // began is saved after it.
+    if (this.isDirty() && !(await this.save({ implicit: true }))) {
+      if (this.isDirty()) result = await this.keep();
     }
     this.closed = true;
     this.generation++;
@@ -678,21 +692,24 @@ export class DocxController implements DocxSession {
   }
 
   /** Keeps the edits a save could not write (`docx-session.ts`). */
-  private async keep(conflict: boolean): Promise<CloseResult> {
-    let bytes = conflict ? null : this.unsaved;
-    if (!bytes) {
-      try {
-        bytes = (await this.bytesToSave()).bytes;
-      } catch (err) {
+  private async keep(): Promise<CloseResult> {
+    let save: SaveBytes | null = null;
+    try {
+      save = await this.bytesToSave();
+    } catch (err) {
+      // What the failed save meant to write, if nothing was edited since.
+      if (this.unsaved?.changes === this.changes) save = this.unsaved;
+      if (!save) {
         log.error("Unsaved Word edits could not be exported", {
           error: String(err),
         });
         return "lost";
       }
     }
+    const conflict = this.state.changedOnDisk;
     stashDocxEdits({
       absolutePath: this.absolutePath,
-      bytes,
+      bytes: save.bytes,
       knownModifiedMs: this.knownModifiedMs,
       reason: conflict
         ? "the file changed on disk while it had unsaved edits"

@@ -118,6 +118,40 @@ function last() {
   return sd.made[sd.made.length - 1];
 }
 
+/** Lets every pending promise settle (a real macrotask). */
+async function settle(rounds = 5) {
+  for (let i = 0; i < rounds; i++) {
+    await new Promise((r) => setImmediate(r));
+  }
+}
+
+async function until(done: () => boolean) {
+  for (let i = 0; i < 100 && !done(); i++) await settle(1);
+  expect(done()).toBe(true);
+}
+
+/** The next save that reaches the disk waits until `release()`. */
+function slowNextSave() {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const normal = vi.mocked(invoke).getMockImplementation();
+  vi.mocked(invoke).mockImplementation(
+    async (cmd: string, args?: any, opts?: any) => {
+      if (cmd === "docx_save") {
+        vi.mocked(invoke).mockImplementation(normal as never);
+        saves.push({ bytes: args, headers: opts?.headers });
+        await gate;
+        disk = { ...disk, modifiedMs: (disk.modifiedMs ?? 0) + 500 };
+        return { ...disk };
+      }
+      return normal?.(cmd, args, opts);
+    },
+  );
+  return () => release();
+}
+
 beforeEach(() => {
   resetDocxSessionsForTest();
   sd.made.length = 0;
@@ -286,6 +320,24 @@ describe("unsaved edits", () => {
     expect(await b.close()).toBe("saved");
     expect(saves).toHaveLength(1);
   });
+
+  it("runs one save at a time, and saves after it what was edited meanwhile", async () => {
+    const { controller } = makeController();
+    await controller.open();
+    last().transact();
+    const release = slowNextSave();
+    const first = controller.save();
+    await until(() => saves.length === 1);
+    last().transact(); // typed while the first save writes
+    const second = controller.save();
+    await settle();
+    expect(saves).toHaveLength(1);
+    release();
+    expect(await first).toBe(false);
+    expect(await second).toBe(true);
+    expect(saves).toHaveLength(2);
+    expect(controller.isDirty()).toBe(false);
+  });
 });
 
 describe("closing with edits a save could not write", () => {
@@ -314,6 +366,24 @@ describe("closing with edits a save could not write", () => {
     expect(b.state.saveError).toMatch(/could not be written/);
     expect(b.isDirty()).toBe(true);
     expect(hasStashedDocxEdits(PATH)).toBe(false);
+  });
+
+  it("saves after a running save what was typed before the tab closed", async () => {
+    const { controller } = makeController();
+    await controller.open();
+    last().transact();
+    const release = slowNextSave();
+    const cmdS = controller.save();
+    await until(() => saves.length === 1);
+    last().transact(); // more typing, then another tab
+    const closing = controller.close();
+    await settle();
+    release();
+    expect(await cmdS).toBe(false);
+    expect(await closing).toBe("saved");
+    expect(saves).toHaveLength(2);
+    expect(hasStashedDocxEdits(PATH)).toBe(false);
+    expect(controller.state.saveError).toBeNull();
   });
 });
 
