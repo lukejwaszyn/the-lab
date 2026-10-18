@@ -189,6 +189,16 @@ export interface DocxControllerOptions {
 /** How long a document may take to open before the tab gives up. */
 export const OPEN_TIMEOUT_MS = 60_000;
 
+/** SuperDoc's comment events that change what a save writes. */
+const COMMENT_CHANGES = new Set([
+  "add",
+  "update",
+  "deleted",
+  "resolved",
+  "change-accepted",
+  "change-rejected",
+]);
+
 export class DocxController implements DocxSession {
   readonly absolutePath: string;
   state: DocxTabState = { ...INITIAL_TAB_STATE };
@@ -263,6 +273,7 @@ export class DocxController implements DocxSession {
         const file = new File([this.original as BlobPart], this.options.name, {
           type: DOCX_MIME,
         });
+        const current = () => ready && generation === this.generation;
         this.sd = new SuperDoc({
           selector: this.options.editor,
           toolbar: `#${this.options.toolbarId}`,
@@ -295,10 +306,24 @@ export class DocxController implements DocxSession {
               | { state?: { doc?: unknown } }
               | undefined;
             if (
-              ready &&
-              generation === this.generation &&
+              current() &&
               tr?.docChanged &&
               editor?.state?.doc !== tr.before
+            ) {
+              this.noteChange();
+            }
+          },
+          onCommentsUpdate: (event) => {
+            // A comment added, answered, resolved or deleted changes the
+            // file even when the text does not. Tracked changes show as
+            // comments too; their transactions already count.
+            const comment = event?.comment as
+              | { trackedChange?: boolean }
+              | undefined;
+            if (
+              current() &&
+              COMMENT_CHANGES.has(event?.type ?? "") &&
+              !comment?.trackedChange
             ) {
               this.noteChange();
             }

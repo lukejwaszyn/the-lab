@@ -205,6 +205,22 @@ describe("unsaved edits", () => {
     expect(states[states.length - 1].dirty).toBe(true);
   });
 
+  it("counts a comment added, answered, resolved or deleted", async () => {
+    const { controller } = makeController();
+    await controller.open();
+    const comments = (type: string, comment: object = {}) =>
+      last().config.onCommentsUpdate({ type, comment });
+    comments("selected");
+    comments("add", { trackedChange: true }); // its transaction counts
+    expect(controller.isDirty()).toBe(false);
+    for (const type of ["add", "update", "deleted", "resolved"]) {
+      const c = makeController().controller;
+      await c.open();
+      last().config.onCommentsUpdate({ type, comment: {} });
+      expect(c.isDirty()).toBe(true);
+    }
+  });
+
   it("saves through the preserving save, and is clean after", async () => {
     const { controller } = makeController();
     await controller.open();
