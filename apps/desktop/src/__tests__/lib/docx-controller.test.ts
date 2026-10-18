@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // A stand-in for SuperDoc: it records how it was made and lets a test
 // fire its callbacks.
@@ -18,6 +18,7 @@ const sd = vi.hoisted(() => {
     };
     setDocumentMode = vi.fn();
     destroy = vi.fn();
+    exported = 0;
     constructor(config: any) {
       this.config = config;
       made.push(this);
@@ -27,7 +28,9 @@ const sd = vi.hoisted(() => {
       this.listeners[event] = f;
     }
     async export() {
-      const bytes = this.exports.shift() ?? new Uint8Array([9, 9]);
+      // Each export differs from the last, as an edited document's would.
+      const bytes =
+        this.exports.shift() ?? new Uint8Array([9, ++this.exported]);
       // jsdom's Blob has no arrayBuffer(); WebKit's does.
       return { arrayBuffer: async () => bytes.slice().buffer };
     }
@@ -72,6 +75,7 @@ vi.mock("@/lib/docx/preserve", () => ({
 }));
 
 import {
+  AUTOSAVE_MS,
   DocxController,
   EQUATION_NOTE,
   decideOnDiskChange,
@@ -119,7 +123,7 @@ function last() {
   return sd.made[sd.made.length - 1];
 }
 
-/** Lets every pending promise settle (a real macrotask). */
+/** Lets every pending promise settle (a real macrotask; only timeouts are faked). */
 async function settle(rounds = 5) {
   for (let i = 0; i < rounds; i++) {
     await new Promise((r) => setImmediate(r));
@@ -152,6 +156,20 @@ function slowNextSave() {
   );
   return () => release();
 }
+
+/** A tab opened with real timers, then the autosave's timeouts faked. */
+async function openWithFakeTimers(
+  options: Partial<ConstructorParameters<typeof DocxController>[0]> = {},
+) {
+  const made = makeController(options);
+  await made.controller.open();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  return made;
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 beforeEach(() => {
   resetDocxSessionsForTest();
@@ -306,6 +324,21 @@ describe("unsaved edits", () => {
     expect(controller.state.saveError).toMatch(/read-only/);
   });
 
+  it("does not write when the edits were undone", async () => {
+    const { controller } = makeController();
+    await controller.open();
+    last().transact();
+    // The spliced file is the original, byte for byte.
+    vi.mocked(preserveUnchanged).mockImplementationOnce((o: Uint8Array) => ({
+      bytes: o,
+      preserved: true,
+      changedParts: [],
+    }));
+    expect(await controller.save()).toBe(true);
+    expect(saves).toHaveLength(0);
+    expect(controller.state.dirty).toBe(false);
+  });
+
   it("saves on close, unless the file is being deleted", async () => {
     const a = makeController().controller;
     await a.open();
@@ -352,6 +385,102 @@ describe("unsaved edits", () => {
     expect(await controller.save({ implicit: true })).toBe(false);
     expect(saves).toHaveLength(0);
     expect(await controller.save()).toBe(true);
+    expect(saves).toHaveLength(1);
+  });
+});
+
+describe("saving after a pause in editing", () => {
+  it("pauses as long as a text tab", () => {
+    expect(AUTOSAVE_MS).toBe(2000);
+  });
+
+  it("saves a dirty tab once editing has paused, and not before", async () => {
+    const { controller } = await openWithFakeTimers();
+    last().transact();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS - 500);
+    last().transact(); // still typing: the pause starts again
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS - 1);
+    await settle();
+    expect(saves).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await until(() => saves.length === 1);
+    expect(controller.isDirty()).toBe(false);
+    expect(controller.state.dirty).toBe(false);
+  });
+
+  it("never writes when nothing changed", async () => {
+    const { controller } = await openWithFakeTimers();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS * 5);
+    last().transact(false); // refused, as by the equation guard
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS * 5);
+    await settle();
+    expect(saves).toHaveLength(0);
+    // Edited and edited back.
+    last().transact();
+    vi.mocked(preserveUnchanged).mockImplementationOnce((o: Uint8Array) => ({
+      bytes: o,
+      preserved: true,
+      changedParts: [],
+    }));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+    await until(() => !controller.isDirty());
+    expect(saves).toHaveLength(0);
+  });
+
+  it("refuses to write over a change on disk, and shows the banner", async () => {
+    const { controller } = await openWithFakeTimers();
+    last().transact();
+    fileOnDisk({ modifiedMs: 6000 }); // Word, or a Claude run, saved it
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+    await until(() => controller.state.changedOnDisk);
+    expect(saves).toHaveLength(0);
+    last().transact();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+    await settle();
+    expect(saves).toHaveLength(0);
+    expect(controller.isDirty()).toBe(true);
+    // Keep mine: the next pause saves over it.
+    await controller.keepMine();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+    await until(() => saves.length === 1);
+  });
+
+  it("keeps saving while Word has the file open", async () => {
+    const { controller } = await openWithFakeTimers();
+    fileOnDisk({ openInWord: true });
+    await controller.checkDisk();
+    expect(controller.state.openInWord).toBe(true);
+    last().transact();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+    await until(() => saves.length === 1);
+    expect(controller.state.openInWord).toBe(true);
+  });
+
+  it("waits for a running save instead of starting another", async () => {
+    const { controller } = await openWithFakeTimers();
+    last().transact();
+    const release = slowNextSave();
+    const cmdS = controller.save();
+    await until(() => saves.length === 1);
+    last().transact();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS * 3);
+    await settle();
+    expect(saves).toHaveLength(1);
+    release();
+    await cmdS;
+    await until(() => saves.length === 2);
+    await settle();
+    expect(saves).toHaveLength(2);
+    expect(controller.isDirty()).toBe(false);
+  });
+
+  it("stops when the tab closes", async () => {
+    const { controller } = await openWithFakeTimers();
+    last().transact();
+    expect(await controller.close()).toBe("saved");
+    expect(saves).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS * 3);
+    await settle();
     expect(saves).toHaveLength(1);
   });
 });

@@ -39,8 +39,8 @@ let toolbarCount = 0;
 
 /**
  * The Lab's Word tab: SuperDoc in Editing, Suggesting or Viewing mode. It
- * saves on ⌘S and when it closes (another tab, the project closing or
- * switching, the window closing), never on a timer.
+ * saves on ⌘S, after a pause in editing, and when it closes (another tab,
+ * the project closing or switching, the window closing).
  */
 export function DocxEditor({ file }: { file: ProjectFile }) {
   const editorRef = useRef<HTMLDivElement>(null);

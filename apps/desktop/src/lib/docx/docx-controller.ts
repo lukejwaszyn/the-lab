@@ -4,6 +4,9 @@
  * edited byte for byte, `preserve.ts`), and watches the file on disk: a
  * change made elsewhere reloads a tab with no unsaved edits and asks about
  * one with them, and Word's owner file beside it means Word has it open.
+ *
+ * It saves on ⌘S, after a pause in editing, and when the tab closes. No
+ * save writes over a change made on disk that the tab has not shown.
  */
 import { readFile } from "@tauri-apps/plugin-fs";
 import type { SuperDoc } from "superdoc";
@@ -194,10 +197,27 @@ export interface DocxControllerOptions {
   onChange: (state: DocxTabState) => void;
   /** SuperDoc changed the mode itself (from its own menu). */
   onModeChange?: (mode: DocxMode) => void;
+  /** The pause in editing after which the tab saves itself; 0 for never. */
+  autosaveMs?: number;
 }
 
 /** How long a document may take to open before the tab gives up. */
 export const OPEN_TIMEOUT_MS = 60_000;
+
+/**
+ * A Word tab saves itself after this pause in editing, the same as a text
+ * tab (`scheduleAutoSave` in `document-store.ts`). It bounds what a quit
+ * that closes no window (from the Dock, logging out, shutting down) can
+ * lose: tao tells the app only as it ends.
+ */
+export const AUTOSAVE_MS = 2000;
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
 
 /** SuperDoc's comment events that change what a save writes. */
 const COMMENT_CHANGES = new Set([
@@ -252,11 +272,14 @@ export class DocxController implements DocxSession {
   private closed = false;
   private saving: Promise<boolean> | null = null;
   private noteTimer: ReturnType<typeof setTimeout> | null = null;
+  private autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly autosaveMs: number;
 
   constructor(options: DocxControllerOptions) {
     this.options = options;
     this.absolutePath = options.absolutePath;
     this.mode = options.mode;
+    this.autosaveMs = options.autosaveMs ?? AUTOSAVE_MS;
   }
 
   private update(patch: Partial<DocxTabState>) {
@@ -278,6 +301,22 @@ export class DocxController implements DocxSession {
   private noteChange() {
     this.changes++;
     if (!this.state.dirty) this.update({ dirty: true });
+    this.scheduleAutosave();
+  }
+
+  /** (Re)starts the pause after which a dirty tab saves itself. */
+  private scheduleAutosave() {
+    this.cancelAutosave();
+    if (this.closed || this.autosaveMs <= 0) return;
+    this.autosaveTimer = setTimeout(() => {
+      this.autosaveTimer = null;
+      if (!this.closed && this.isDirty()) void this.save({ implicit: true });
+    }, this.autosaveMs);
+  }
+
+  private cancelAutosave() {
+    if (this.autosaveTimer) clearTimeout(this.autosaveTimer);
+    this.autosaveTimer = null;
   }
 
   /**
@@ -286,6 +325,7 @@ export class DocxController implements DocxSession {
    */
   async open(): Promise<void> {
     const generation = ++this.generation;
+    this.cancelAutosave();
     this.changes = 0;
     this.savedChanges = 0;
     this.restored = false;
@@ -527,10 +567,10 @@ export class DocxController implements DocxSession {
    * what is still unsaved (edits made meanwhile).
    *
    * No save writes over a change made on disk that the tab has not shown:
-   * it shows it instead (Reload or Keep mine). An implicit save (leaving
-   * the tab, renaming, closing the window) also does not write over a
-   * change the tab is still asking about, which ⌘S does, as Keep mine
-   * would.
+   * it shows it instead (Reload or Keep mine). An implicit save (a pause
+   * in editing, leaving the tab, renaming, closing the window) also does
+   * not write over a change the tab is still asking about, which ⌘S does,
+   * as Keep mine would.
    */
   async save(options: SaveOptions = {}): Promise<boolean> {
     while (this.saving) await this.saving;
@@ -586,6 +626,12 @@ export class DocxController implements DocxSession {
         }
       }
       const save = await this.bytesToSave();
+      if (!this.restored && sameBytes(save.bytes, this.original)) {
+        // Edited and edited back: the file is already what it should be.
+        this.savedChanges = save.changes;
+        this.update({ saving: false, dirty: this.isDirty() });
+        return !this.isDirty();
+      }
       this.unsaved = save;
       const disk = await saveDocxBytes(this.absolutePath, save.bytes);
       this.original = save.bytes;
@@ -647,7 +693,10 @@ export class DocxController implements DocxSession {
     await this.open();
   }
 
-  /** Keeps the tab's edits; the next save replaces the file on disk. */
+  /**
+   * Keeps the tab's edits; the next save, ⌘S or after the pause in
+   * editing, replaces the file on disk.
+   */
   async keepMine(): Promise<void> {
     try {
       this.knownModifiedMs = (await fileState(this.absolutePath)).modifiedMs;
@@ -655,10 +704,12 @@ export class DocxController implements DocxSession {
       /* the next look asks again */
     }
     this.update({ changedOnDisk: false });
+    if (this.isDirty()) this.scheduleAutosave();
   }
 
   discard(): void {
     this.discarded = true;
+    this.cancelAutosave();
     if (this.state.dirty) this.update({ dirty: false });
   }
 
@@ -689,14 +740,16 @@ export class DocxController implements DocxSession {
 
   private async closeNow(): Promise<CloseResult> {
     if (this.closed) return "saved";
+    this.cancelAutosave();
     let result: CloseResult = "saved";
-    // A save running (⌘S) finishes first, and what was edited after it
-    // began is saved after it.
+    // A save running (⌘S, or after a pause) finishes first, and what was
+    // edited after it began is saved after it.
     if (this.isDirty() && !(await this.save({ implicit: true }))) {
       if (this.isDirty()) result = await this.keep();
     }
     this.closed = true;
     this.generation++;
+    this.cancelAutosave();
     if (this.noteTimer) clearTimeout(this.noteTimer);
     this.destroyEditor();
     return result;

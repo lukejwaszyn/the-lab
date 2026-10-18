@@ -1,9 +1,9 @@
 /**
  * The Lab: the open Word tabs, so that the rest of the app can save them
  * when it must: before a file or project is renamed or moved, and before
- * the window closes or the app quits. A Word tab saves on ⌘S and when it
- * stops being shown (another tab, the project closing or switching); it
- * has no timer, because every save rewrites the whole package.
+ * the window closes or the app quits. A Word tab also saves on ⌘S, after a
+ * pause in editing, and when it stops being shown (another tab, the
+ * project closing or switching).
  *
  * A tab whose save fails when it stops being shown does not lose its
  * edits: the bytes it meant to write are kept here, its file keeps its
@@ -22,9 +22,9 @@ const log = createLogger("docx");
 
 export interface SaveOptions {
   /**
-   * The save was asked for by leaving the tab, renaming or closing, not
-   * by ⌘S: it does not overwrite a change made on disk that the tab has
-   * not been told to keep or drop.
+   * The save was asked for by a pause in editing, leaving the tab,
+   * renaming or closing, not by ⌘S: it does not overwrite a change made
+   * on disk that the tab has not been told to keep or drop.
    */
   implicit?: boolean;
 }
