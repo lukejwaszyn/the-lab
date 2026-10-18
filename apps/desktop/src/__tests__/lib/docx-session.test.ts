@@ -30,6 +30,7 @@ import {
   isAtOrUnder,
   moveDocxEdits,
   movedPath,
+  noteDocxEdit,
   registerDocxSession,
   resetDocxSessionsForTest,
   stashDocxEdits,
@@ -325,5 +326,45 @@ describe("saving before the window closes", () => {
     const second = { preventDefault: vi.fn() };
     await closeListeners.handlers[0](second);
     expect(second.preventDefault).not.toHaveBeenCalled();
+    // The second close still tried to save first.
+    expect(a.save).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks again after an edit made since a refused close", async () => {
+    const a = session("/p/a.docx", true, false);
+    registerDocxSession(a);
+    await settle();
+    const first = { preventDefault: vi.fn() };
+    await closeListeners.handlers[0](first);
+    expect(first.preventDefault).toHaveBeenCalled();
+    noteDocxEdit(); // typed on after the warning
+    const second = { preventDefault: vi.fn() };
+    await closeListeners.handlers[0](second);
+    expect(second.preventDefault).toHaveBeenCalled();
+    const third = { preventDefault: vi.fn() };
+    await closeListeners.handlers[0](third);
+    expect(third.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("forgets a refused close once the edits are saved", async () => {
+    let saves = false;
+    const a = session("/p/a.docx", true, false);
+    a.save.mockImplementation(async () => {
+      if (saves) a.setDirty(false);
+      return saves;
+    });
+    registerDocxSession(a);
+    await settle();
+    await closeListeners.handlers[0]({ preventDefault: vi.fn() });
+    saves = true;
+    const second = { preventDefault: vi.fn() };
+    await closeListeners.handlers[0](second);
+    expect(second.preventDefault).not.toHaveBeenCalled();
+    // New unsaved edits later: a close that cannot save them asks again.
+    saves = false;
+    a.setDirty(true);
+    const third = { preventDefault: vi.fn() };
+    await closeListeners.handlers[0](third);
+    expect(third.preventDefault).toHaveBeenCalled();
   });
 });

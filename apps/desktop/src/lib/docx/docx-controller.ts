@@ -16,6 +16,7 @@ import { createLogger } from "@/lib/debug/logger";
 import type { DocxMode } from "@/stores/docx-store";
 import {
   fileState,
+  noteDocxEdit,
   saveDocxBytes,
   stashDocxEdits,
   takeStashedDocxEdits,
@@ -319,6 +320,7 @@ export class DocxController implements DocxSession {
 
   private noteChange() {
     this.changes++;
+    noteDocxEdit();
     if (!this.state.dirty) this.update({ dirty: true });
     this.scheduleAutosave();
   }

@@ -260,7 +260,16 @@ export const CLOSE_SAVE_TIMEOUT_MS = 20_000;
 
 let unlisten: (() => void) | null = null;
 let listening: Promise<void> | null = null;
-let closeAnyway = false;
+/**
+ * A close was refused for unsaved Word edits, and none has been made
+ * since: the next close that still cannot save lets the window close.
+ */
+let warned = false;
+
+/** A Word tab was edited: a refused close counts again from the start. */
+export function noteDocxEdit(): void {
+  warned = false;
+}
 
 function withTimeout<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
   return new Promise((resolve) => {
@@ -282,23 +291,29 @@ function withTimeout<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
  * The window's close request (its close button, ⌘W, or The Lab's Quit)
  * saves the unsaved Word tabs first. If one cannot be saved (a failed
  * save, a change on disk the tab is still asking about, or a save that
- * would rewrite the whole file), the window stays open once, saying so;
- * a second close discards.
+ * would rewrite the whole file), the window stays open, saying so. The
+ * next close tries to save again, and if it still cannot, discards, as
+ * long as no Word tab was edited in between.
  */
 async function onCloseRequested(event: { preventDefault(): void }) {
-  if (closeAnyway || !hasUnsavedDocx()) return;
+  if (!hasUnsavedDocx()) {
+    warned = false;
+    return;
+  }
   const saved = await withTimeout(
     flushDocxEdits(),
     CLOSE_SAVE_TIMEOUT_MS,
     false,
   );
-  if (!saved) {
-    event.preventDefault();
-    closeAnyway = true;
-    toast.error(
-      "A Word file has edits that were not saved, so the window stayed open. Open it to see why, or close the window again to discard them.",
-    );
+  if (saved || warned) {
+    warned = false;
+    return;
   }
+  event.preventDefault();
+  warned = true;
+  toast.error(
+    "A Word file has edits that were not saved, so the window stayed open. Open it to see why, or close the window again to discard them.",
+  );
 }
 
 /**
@@ -308,7 +323,7 @@ async function onCloseRequested(event: { preventDefault(): void }) {
 export function updateCloseGuard(): void {
   const wanted = hasUnsavedDocx();
   if (wanted && !unlisten && !listening) {
-    closeAnyway = false;
+    warned = false;
     listening = (async () => {
       try {
         const stop =
@@ -335,5 +350,5 @@ export function resetDocxSessionsForTest(): void {
   unlisten?.();
   unlisten = null;
   listening = null;
-  closeAnyway = false;
+  warned = false;
 }
