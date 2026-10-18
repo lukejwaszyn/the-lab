@@ -17,6 +17,7 @@ import {
   FolderOpenIcon,
   XIcon,
   FileTextIcon,
+  FileTypeIcon,
   SparklesIcon,
   CheckCircle2Icon,
   CircleIcon,
@@ -38,12 +39,16 @@ import { useProjectStore } from "@/stores/project-store";
 import { useDocumentStore } from "@/stores/document-store";
 import { useClaudeSetupStore } from "@/stores/claude-setup-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
-import { useSettingsStore } from "@/stores/settings-store";
+import {
+  fillTrackChangesAuthorOnce,
+  useSettingsStore,
+} from "@/stores/settings-store";
 import { compileLatex } from "@/lib/latex-compiler";
 import { PROJECT_PDF_CANDIDATES } from "@/lib/compiled-pdf";
 import { getMupdfClient } from "@/lib/mupdf/mupdf-client";
 import { exists, join } from "@/lib/tauri/fs";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -64,7 +69,7 @@ interface DefaultProject {
 }
 
 type ProjectPickerSection = "projects" | "settings";
-type SettingsDetailSection = "provider" | "environment";
+type SettingsDetailSection = "provider" | "environment" | "word";
 
 type RecentProject = {
   path: string;
@@ -402,6 +407,13 @@ export function ProjectPicker() {
                   meta="Python / Skills"
                   onClick={() => setSettingsDetailSection("environment")}
                 />
+                <SettingsDetailButton
+                  active={settingsDetailSection === "word"}
+                  icon={FileTypeIcon}
+                  label="Word files"
+                  meta="Tracked changes"
+                  onClick={() => setSettingsDetailSection("word")}
+                />
               </aside>
 
               <div className="min-w-0">
@@ -412,6 +424,10 @@ export function ProjectPicker() {
                     contentClassName="p-0"
                   >
                     <ClaudeSetup variant="embedded" />
+                  </SettingsPanel>
+                ) : settingsDetailSection === "word" ? (
+                  <SettingsPanel title="Word files" icon={FileTypeIcon}>
+                    <WordFileSettings />
                   </SettingsPanel>
                 ) : (
                   <SettingsPanel
@@ -970,6 +986,41 @@ function SettingsPanel({
       </div>
       <div className={cn("p-4", contentClassName)}>{children}</div>
     </section>
+  );
+}
+
+/** The Lab: the author of the tracked changes made in Word tabs. */
+function WordFileSettings() {
+  const author = useSettingsStore((s) => s.trackChangesAuthor);
+  const setAuthor = useSettingsStore((s) => s.setTrackChangesAuthor);
+
+  // Filled once from the account's full name.
+  useEffect(() => {
+    void fillTrackChangesAuthorOnce();
+  }, []);
+
+  return (
+    <div className="space-y-2">
+      <label
+        htmlFor="thelab-track-changes-author"
+        className="block font-medium text-sm"
+      >
+        Your name for tracked changes
+      </label>
+      <Input
+        id="thelab-track-changes-author"
+        className="max-w-sm"
+        value={author}
+        placeholder="Your name"
+        autoComplete="name"
+        spellCheck={false}
+        onChange={(e) => setAuthor(e.target.value)}
+      />
+      <p className="text-muted-foreground text-xs">
+        Your edits in Suggesting mode carry this name, in The Lab and in Word.
+        It applies to Word files opened after you change it.
+      </p>
+    </div>
   );
 }
 

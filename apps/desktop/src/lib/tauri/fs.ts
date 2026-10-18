@@ -22,6 +22,10 @@ export type ProjectFileType =
   | "pdf"
   | "bib"
   | "style"
+  // The Lab: a Word document (opened in the Word tab) and Word's old binary
+  // format (shown with a note, never as text).
+  | "docx"
+  | "doc"
   | "other";
 
 export interface FsProjectFile {
@@ -98,7 +102,18 @@ export function shouldSkipProjectDirectory(name: string): boolean {
   );
 }
 
+/**
+ * Word, Excel and PowerPoint write an owner file named "~$..." beside a
+ * document while they have it open; The Lab's Word tab writes a hidden
+ * temporary file ending in ".thelab-save" for an instant while it saves.
+ * Neither is the user's.
+ */
+export function isTransientOfficeFile(name: string): boolean {
+  return name.startsWith("~$") || name.endsWith(".thelab-save");
+}
+
 export function getProjectFileType(name: string): ProjectFileType | null {
+  if (isTransientOfficeFile(name)) return null;
   const lower = name.toLowerCase();
   // Skip ignored file extensions (build artifacts, binary/non-text files)
   for (const ext of IGNORED_EXTENSIONS) {
@@ -107,6 +122,8 @@ export function getProjectFileType(name: string): ProjectFileType | null {
   if (lower.endsWith(".tex") || lower.endsWith(".ltx")) return "tex";
   if (lower.endsWith(".bib")) return "bib";
   if (lower.endsWith(".pdf")) return "pdf";
+  if (lower.endsWith(".docx")) return "docx";
+  if (lower.endsWith(".doc")) return "doc";
   for (const ext of IMAGE_EXTENSIONS) {
     if (lower.endsWith(ext)) return "image";
   }

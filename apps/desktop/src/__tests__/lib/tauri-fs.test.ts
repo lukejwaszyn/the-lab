@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { readDir, stat } from "@tauri-apps/plugin-fs";
 import {
   getProjectFileType,
+  isTransientOfficeFile,
   scanProjectFolder,
   shouldSkipProjectDirectory,
 } from "@/lib/tauri/fs";
@@ -33,9 +34,26 @@ describe("tauri fs helpers", () => {
 
     it("keeps imported files with arbitrary extensions visible", () => {
       expect(getProjectFileType("archive.zip")).toBe("other");
-      expect(getProjectFileType("paper.docx")).toBe("other");
       expect(getProjectFileType("data.xlsx")).toBe("other");
       expect(getProjectFileType("movie.mp4")).toBe("other");
+    });
+
+    it("gives Word files their own types", () => {
+      expect(getProjectFileType("paper.docx")).toBe("docx");
+      expect(getProjectFileType("Chapter Draft.DOCX")).toBe("docx");
+      // Word's old binary format shows a note, never its bytes as text.
+      expect(getProjectFileType("old report.doc")).toBe("doc");
+      expect(getProjectFileType("OLD.DOC")).toBe("doc");
+    });
+
+    it("hides Office owner files and the Word tab's save file", () => {
+      expect(getProjectFileType("~$per.docx")).toBeNull();
+      expect(getProjectFileType("~$paper.docx")).toBeNull();
+      expect(getProjectFileType("~$ta.xlsx")).toBeNull();
+      expect(getProjectFileType(".paper.docx.0f3a.thelab-save")).toBeNull();
+      expect(isTransientOfficeFile("~$x.docx")).toBe(true);
+      expect(isTransientOfficeFile("paper~$.docx")).toBe(false);
+      expect(isTransientOfficeFile("$paper.docx")).toBe(false);
     });
   });
 
@@ -104,6 +122,23 @@ describe("tauri fs helpers", () => {
       ]);
       expect(stat).toHaveBeenCalledTimes(2);
       expect(result.files.every((file) => file.type === "other")).toBe(true);
+    });
+
+    it("lists a Word file but not Word's owner file beside it", async () => {
+      vi.mocked(readDir).mockResolvedValue([
+        { name: "report.docx", isDirectory: false },
+        { name: "~$report.docx", isDirectory: false },
+        { name: "legacy.doc", isDirectory: false },
+      ] as any);
+
+      const result = await scanProjectFolder("/project");
+
+      expect(
+        result.files.map((file) => [file.relativePath, file.type]),
+      ).toEqual([
+        ["report.docx", "docx"],
+        ["legacy.doc", "doc"],
+      ]);
     });
   });
 });

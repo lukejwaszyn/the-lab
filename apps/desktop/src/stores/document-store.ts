@@ -24,9 +24,35 @@ import { clearZoomCache } from "@/components/workspace/preview/pdf-preview";
 import { clearEditorStateCache } from "@/components/workspace/editor/latex-editor";
 import { useProjectStore } from "@/stores/project-store";
 import { createLogger } from "@/lib/debug/logger";
+import {
+  discardDocxEdits,
+  flushDocxEdits,
+  hasStashedDocxEdits,
+  moveDocxEdits,
+} from "@/lib/docx/docx-session";
+import { useDocxPrefsStore } from "@/stores/docx-store";
 
 const log = createLogger("document");
+
+/** The window event fired after the file tree is read again from disk. */
+export const FILES_REFRESHED_EVENT = "thelab:files-refreshed";
+
+/** File types whose content is text the editor (and its saves) holds. */
+export function isTextFileType(type: ProjectFileType): boolean {
+  return (
+    type === "tex" || type === "bib" || type === "style" || type === "other"
+  );
+}
 const PROJECT_RENAME_LOCK_RETRY_DELAYS_MS = [150, 300, 600, 1000];
+
+/**
+ * The Lab: Word tabs, their kept edits and their remembered modes follow
+ * a file or folder that moved, so a later save writes where it now is.
+ */
+function followDocxMove(from: string, to: string): void {
+  moveDocxEdits(from, to);
+  useDocxPrefsStore.getState().movePaths(from, to);
+}
 
 export interface ProjectFile {
   id: string; // relativePath is the id
@@ -108,6 +134,8 @@ export interface DocumentState {
   renameFile: (id: string, name: string) => void;
   updateFileContent: (id: string, content: string) => void;
   updateImageDataUrl: (id: string, dataUrl: string) => void;
+  /** The Lab: a Word tab's unsaved state, for the file tree's dot. */
+  markFileDirty: (id: string, dirty: boolean) => void;
   setCursorPosition: (position: number) => void;
   setSelectionRange: (range: { start: number; end: number } | null) => void;
   requestJumpToPosition: (position: number) => void;
@@ -385,7 +413,8 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
         relativePath: f.relativePath,
         absolutePath: f.absolutePath,
         type: f.type,
-        isDirty: false,
+        // The Lab: a Word file's edits kept after a failed save.
+        isDirty: f.type === "docx" && hasStashedDocxEdits(f.absolutePath),
         fileSize: f.fileSize,
       };
 
@@ -487,7 +516,8 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     const dirtyFiles = get().files.filter(
       (f) => f.isDirty && f.content != null,
     );
-    if (dirtyFiles.length > 0) {
+    // Word tabs save too, before the folder moves under them.
+    if (dirtyFiles.length > 0 || !(await flushDocxEdits(oldRoot))) {
       throw new Error("Save failed. Please save changes before renaming.");
     }
 
@@ -506,6 +536,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     await sleep(150);
 
     await renameProjectRootWithRetry(oldRoot, newRoot);
+    followDocxMove(oldRoot, newRoot);
     try {
       await invoke("migrate_project_sessions", {
         oldProjectPath: oldRoot,
@@ -595,6 +626,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     if (state.files.length <= 1) return;
     const file = state.files.find((f) => f.id === id);
     if (file) {
+      discardDocxEdits(file.absolutePath);
       try {
         await deleteFileFromDisk(file.absolutePath);
       } catch (e) {
@@ -647,6 +679,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     // Delete folder from disk (recursive)
     try {
       const absPath = await join(state.projectRoot, folderPath);
+      discardDocxEdits(absPath);
       await deleteFolderFromDisk(absPath);
     } catch (e) {
       log.error("Failed to delete folder from disk", { error: String(e) });
@@ -704,12 +737,18 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     const newRelativePath = dir ? `${dir}/${name}` : name;
 
     const newAbsPath = await join(state.projectRoot, newRelativePath);
+    // A Word tab saves before its file moves.
+    if (!(await flushDocxEdits(file.absolutePath))) {
+      log.error("Not renamed: the Word file could not be saved first");
+      return;
+    }
     try {
       await renameFileOnDisk(file.absolutePath, newAbsPath);
     } catch (e) {
       log.error("Failed to rename file on disk", { error: String(e) });
       return;
     }
+    followDocxMove(file.absolutePath, newAbsPath);
     migratePdfBytesKey(id, newRelativePath);
     set((s) => {
       const compileErrorCache = migrateCacheKey(
@@ -755,6 +794,16 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
   updateImageDataUrl: (id, dataUrl) => {
     set((state) => ({
       files: state.files.map((f) => (f.id === id ? { ...f, dataUrl } : f)),
+    }));
+  },
+
+  markFileDirty: (id, dirty) => {
+    const file = get().files.find((f) => f.id === id);
+    if (!file || file.isDirty === dirty) return;
+    set((state) => ({
+      files: state.files.map((f) =>
+        f.id === id ? { ...f, isDirty: dirty } : f,
+      ),
     }));
   },
 
@@ -822,8 +871,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
   insertAtCursor: (text) => {
     const state = get();
     const activeFile = getActiveFile(state);
-    if (!activeFile || activeFile.type === "image" || activeFile.type === "pdf")
-      return;
+    if (!activeFile || !isTextFileType(activeFile.type)) return;
 
     const content = activeFile.content ?? "";
     const { cursorPosition } = state;
@@ -843,8 +891,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
   replaceSelection: (start, end, text) => {
     const state = get();
     const activeFile = getActiveFile(state);
-    if (!activeFile || activeFile.type === "image" || activeFile.type === "pdf")
-      return;
+    if (!activeFile || !isTextFileType(activeFile.type)) return;
 
     const content = activeFile.content ?? "";
     const newContent = content.slice(0, start) + text + content.slice(end);
@@ -862,8 +909,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
   findAndReplace: (find, replace) => {
     const state = get();
     const activeFile = getActiveFile(state);
-    if (!activeFile || activeFile.type === "image" || activeFile.type === "pdf")
-      return false;
+    if (!activeFile || !isTextFileType(activeFile.type)) return false;
 
     const content = activeFile.content ?? "";
     if (!content.includes(find)) return false;
@@ -916,6 +962,10 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
 
   saveCurrentFile: async () => {
     const state = get();
+    const active = getActiveFile(state);
+    if (active?.type === "docx") {
+      await flushDocxEdits(active.absolutePath, { explicit: true });
+    }
     await state.saveFile(state.activeFileId);
     // Manual save → immediate snapshot
     if (state.projectRoot) {
@@ -1013,7 +1063,11 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
       desiredPath,
     );
     const newAbsPath = await join(state.projectRoot, newRelativePath);
+    if (!(await flushDocxEdits(file.absolutePath))) {
+      throw new Error(`${file.name} could not be saved, so it was not moved.`);
+    }
     await renameFileOnDisk(file.absolutePath, newAbsPath);
+    followDocxMove(file.absolutePath, newAbsPath);
 
     const newName = newRelativePath.split(/[/\\]/).pop() || file.name;
     migratePdfBytesKey(fileId, newRelativePath);
@@ -1062,7 +1116,11 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
 
     const oldAbsPath = await join(state.projectRoot, folderPath);
     const newAbsPath = await join(state.projectRoot, newFolderPath);
+    if (!(await flushDocxEdits(oldAbsPath))) {
+      throw new Error("A Word file in the folder could not be saved first.");
+    }
     await renameFileOnDisk(oldAbsPath, newAbsPath);
+    followDocxMove(oldAbsPath, newAbsPath);
 
     // Reload project to pick up all new paths
     await state.openProject(state.projectRoot);
@@ -1134,7 +1192,8 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
           relativePath: fsFile.relativePath,
           absolutePath: fsFile.absolutePath,
           type: fsFile.type,
-          isDirty: false,
+          isDirty:
+            fsFile.type === "docx" && hasStashedDocxEdits(fsFile.absolutePath),
           fileSize: fsFile.fileSize,
         };
         const isLargeNonEssential =
@@ -1182,6 +1241,10 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
       activeFileId: newActiveId,
       contentGeneration: s.contentGeneration + 1,
     }));
+    // Word tabs look at their files again (as after each Claude run).
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(FILES_REFRESHED_EVENT));
+    }
   },
 
   loadFileContent: async (id) => {

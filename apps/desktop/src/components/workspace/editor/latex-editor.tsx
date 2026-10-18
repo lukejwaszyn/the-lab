@@ -93,6 +93,7 @@ import {
 import { ClaudeChatDrawer } from "@/components/claude-chat/claude-chat-drawer";
 import { ProposedChangesPanel } from "@/components/claude-chat/proposed-changes-panel";
 import { ImagePreview } from "./image-preview";
+import { DocxEditor, LegacyDocNotice } from "./docx-editor";
 import { SearchPanel } from "./search-panel";
 import {
   ProblemsPanel,
@@ -1190,21 +1191,28 @@ export function LatexEditor() {
   }, []);
 
   const isPdf = activeFile?.type === "pdf";
-  const isImage = !isTextFile && !isPdf && !!activeFile;
+  // The Lab: Word files open in their own tab (SuperDoc), and the old .doc
+  // format shows a note instead of its bytes.
+  const isDocx = activeFile?.type === "docx";
+  const isDoc = activeFile?.type === "doc";
+  const isImage = !isTextFile && !isPdf && !isDocx && !isDoc && !!activeFile;
+  const isViewer = isPdf || isImage || isDocx || isDoc;
 
   return (
     <div className="flex h-full min-w-0 flex-col bg-background">
       {/* Toolbar — adapts to file type */}
-      <EditorToolbar
-        editorView={viewRef}
-        fileType={isPdf || isImage ? "image" : undefined}
-        imageScale={isPdf || isImage ? imageScale : undefined}
-        onImageScaleChange={isPdf || isImage ? setImageScale : undefined}
-        cropMode={isImage ? cropMode : undefined}
-        onCropToggle={isImage ? () => setCropMode((v) => !v) : undefined}
-      />
+      {!isDocx && !isDoc && (
+        <EditorToolbar
+          editorView={viewRef}
+          fileType={isPdf || isImage ? "image" : undefined}
+          imageScale={isPdf || isImage ? imageScale : undefined}
+          onImageScaleChange={isPdf || isImage ? setImageScale : undefined}
+          cropMode={isImage ? cropMode : undefined}
+          onCropToggle={isImage ? () => setCropMode((v) => !v) : undefined}
+        />
+      )}
       {/* Text-editor-only panels */}
-      {!isPdf && !isImage && !isLargeFileNotLoaded && isSearchOpen && (
+      {!isViewer && !isLargeFileNotLoaded && isSearchOpen && (
         <SearchPanel
           searchQuery={searchQuery}
           onSearchQueryChange={setSearchQuery}
@@ -1219,7 +1227,7 @@ export function LatexEditor() {
           currentMatch={currentMatch}
         />
       )}
-      {!isPdf && !isImage && !isLargeFileNotLoaded && reviewingSnapshot && (
+      {!isViewer && !isLargeFileNotLoaded && reviewingSnapshot && (
         <div className="flex h-9 shrink-0 items-center justify-between border-border border-b bg-amber-500/10 px-3">
           <div className="flex items-center gap-2 text-xs">
             <RotateCcwIcon className="size-3.5 text-amber-600 dark:text-amber-400" />
@@ -1276,7 +1284,7 @@ export function LatexEditor() {
       )}
       {/* Main content area — single wrapper keeps ClaudeChatDrawer stable */}
       <div
-        ref={isPdf || isImage ? undefined : parentRef}
+        ref={isViewer ? undefined : parentRef}
         className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
       >
         {/* PDF content */}
@@ -1297,6 +1305,11 @@ export function LatexEditor() {
             onCropModeChange={setCropMode}
           />
         )}
+        {/* Word files */}
+        {isDocx && activeFile && (
+          <DocxEditor key={activeFile.absolutePath} file={activeFile} />
+        )}
+        {isDoc && activeFile && <LegacyDocNotice file={activeFile} />}
         {/* Large file warning */}
         {isLargeFileNotLoaded && activeFile && (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
@@ -1322,7 +1335,7 @@ export function LatexEditor() {
           </div>
         )}
         {/* Text editor content */}
-        {!isPdf && !isImage && !isLargeFileNotLoaded && (
+        {!isViewer && !isLargeFileNotLoaded && (
           <>
             <div
               ref={containerRef}
@@ -1448,7 +1461,7 @@ export function LatexEditor() {
         <ClaudeChatDrawer />
       </div>
       {/* Text-editor-only bottom panels */}
-      {!isPdf && !isImage && !isLargeFileNotLoaded && problems.length > 0 && (
+      {!isViewer && !isLargeFileNotLoaded && problems.length > 0 && (
         <ProblemsPanel
           diagnostics={problems}
           fileName={activeFile?.relativePath ?? "main.tex"}
@@ -1487,7 +1500,7 @@ export function LatexEditor() {
       )}
       {/* Run's output, beside Problems; it shows whatever file is open. */}
       <OutputPanel />
-      {!isPdf && !isImage && !isLargeFileNotLoaded && activeFileChange && (
+      {!isViewer && !isLargeFileNotLoaded && activeFileChange && (
         <ProposedChangesPanel
           change={activeFileChange}
           changeIndex={proposedChanges.findIndex(

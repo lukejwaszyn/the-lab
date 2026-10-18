@@ -183,4 +183,4 @@ This project started from [Open Prism](https://github.com/assistant-ui/open-pris
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](./LICENSE). The app bundles MuPDF (AGPL-3.0), so the app as distributed is AGPL. SuperDoc (AGPL-3.0) edits Word files.

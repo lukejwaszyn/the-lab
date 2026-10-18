@@ -23,6 +23,10 @@ export default defineConfig({
   },
   define: {
     __MUPDF_WASM_FS_PATH__: JSON.stringify(mupdfWasmFile.replace(/\\/g, "/")),
+    // Vue's build flags, for SuperDoc (the Word tab), which is built on Vue.
+    __VUE_OPTIONS_API__: "true",
+    __VUE_PROD_DEVTOOLS__: "false",
+    __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: "false",
   },
   worker: {
     format: "es",
