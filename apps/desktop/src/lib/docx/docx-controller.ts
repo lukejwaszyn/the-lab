@@ -244,8 +244,10 @@ const COMMENT_CHANGES = new Set([
 ]);
 
 /**
- * What became of a tab's edits when it closed: saved, kept unsaved for
- * when the file is opened again (`docx-session.ts`), or lost.
+ * What became of a tab's edits when it closed: none is left unsaved
+ * ("saved": written, or there were none, or they were dropped with a
+ * deleted file), kept unsaved for when the file is opened again
+ * (`docx-session.ts`), or lost.
  */
 export type CloseResult = "saved" | "kept" | "lost";
 
