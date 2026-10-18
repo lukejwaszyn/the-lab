@@ -17,7 +17,11 @@ import {
   indentLess,
   toggleComment,
 } from "@codemirror/commands";
-import { syntaxHighlighting, syntaxTreeAvailable } from "@codemirror/language";
+import {
+  indentUnit,
+  syntaxHighlighting,
+  syntaxTreeAvailable,
+} from "@codemirror/language";
 import { oneDark, oneDarkHighlightStyle } from "@codemirror/theme-one-dark";
 import { defaultHighlightStyle } from "@codemirror/language";
 import { useTheme } from "next-themes";
@@ -37,6 +41,12 @@ import {
 } from "@codemirror/merge";
 import { latex, latexLinter } from "codemirror-lang-latex";
 import { bibtex } from "./lang-bibtex";
+import {
+  codeIndentUnit,
+  codeLanguageFor,
+  loadCodeLanguage,
+  loadedCodeLanguage,
+} from "./code-languages";
 import {
   linter,
   lintGutter,
@@ -194,6 +204,7 @@ export function LatexEditor() {
   const themeCompartmentRef = useRef(new Compartment());
   const mergeCompartmentRef = useRef(new Compartment());
   const vimCompartmentRef = useRef(new Compartment());
+  const languageCompartmentRef = useRef(new Compartment());
   const isMergeActiveRef = useRef(false);
   const pendingChangeRef = useRef<ProposedChange | null>(null);
   const handleKeepAllRef = useRef<() => void>(() => {});
@@ -645,6 +656,15 @@ export function LatexEditor() {
       ]),
     );
 
+    // A code file (.py, .json, ...) gets its own language, loaded the first
+    // time one opens; until then it is plain. Others keep LaTeX or BibTeX.
+    // A code file also indents by the unit its text uses (or its language's
+    // usual one), so Enter in a 4-space .py file gives 4-space lines.
+    const codeLanguage =
+      activeFile?.type === "other"
+        ? codeLanguageFor(activeFile.relativePath)
+        : null;
+
     const state = EditorState.create({
       doc: currentContent,
       extensions: [
@@ -659,7 +679,16 @@ export function LatexEditor() {
           ...defaultKeymap,
           ...historyKeymap,
         ]),
-        activeFile?.type === "bib" ? bibtex() : latex({ enableLinting: false }),
+        languageCompartmentRef.current.of(
+          codeLanguage
+            ? (loadedCodeLanguage(codeLanguage) ?? [])
+            : activeFile?.type === "bib"
+              ? bibtex()
+              : latex({ enableLinting: false }),
+        ),
+        ...(codeLanguage
+          ? [indentUnit.of(codeIndentUnit(codeLanguage, currentContent))]
+          : []),
         ...(activeFile?.type === "tex"
           ? [
               linter((view) => {
@@ -813,6 +842,16 @@ export function LatexEditor() {
 
     const view = new EditorView({ state, parent: containerRef.current });
     viewRef.current = view;
+
+    if (codeLanguage && !loadedCodeLanguage(codeLanguage)) {
+      loadCodeLanguage(codeLanguage).then((extension) => {
+        // The file may have been switched or closed while the pack loaded.
+        if (!extension || viewRef.current !== view) return;
+        view.dispatch({
+          effects: languageCompartmentRef.current.reconfigure(extension),
+        });
+      });
+    }
 
     // Restore per-file cursor + scroll from cache
     const cached = editorStateCache.get(activeFileId);
