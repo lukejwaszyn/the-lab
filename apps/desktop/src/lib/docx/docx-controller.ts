@@ -124,11 +124,12 @@ const MATH_NODES = new Set(["mathInline", "mathBlock"]);
 interface PmNode {
   type: { name: string };
   nodeSize: number;
-  descendants(f: (node: PmNode) => boolean | undefined): void;
+  isText?: boolean;
+  descendants(f: (node: PmNode, pos: number) => boolean | undefined): void;
   nodesBetween(
     from: number,
     to: number,
-    f: (node: PmNode) => boolean | undefined,
+    f: (node: PmNode, pos: number) => boolean | undefined,
   ): void;
 }
 interface PmStep {
@@ -155,22 +156,36 @@ function countMath(doc: PmNode): number {
 }
 
 /**
- * Whether `tr` removes an equation. SuperDoc shows Word's equations but
- * cannot edit them: selecting one and typing would replace it. Undo and
- * redo may.
+ * Whether `tr` edits an equation: it removes one, and what it removes is
+ * the equation alone (selected and typed over, or deleted with Backspace).
+ * SuperDoc shows Word's equations but cannot edit them, and typing would
+ * replace one. Deleting a passage that holds an equation is allowed, as
+ * are undo and redo, and accepting or rejecting tracked changes (which
+ * SuperDoc marks to skip change tracking).
  */
 export function removesEquation(tr: PmTransaction, before: PmNode): boolean {
   if (!tr.docChanged || tr.getMeta("history$") !== undefined) return false;
-  let touches = false;
+  if (tr.getMeta("skipTrackChanges") === true) return false;
+  let equationAlone = false;
   tr.steps.forEach((step, i) => {
-    if (touches || step.from == null || step.to == null) return;
-    if (step.to <= step.from) return;
-    tr.docs[i]?.nodesBetween(step.from, step.to, (node) => {
-      if (MATH_NODES.has(node.type.name)) touches = true;
-      return !touches;
+    if (equationAlone || step.from == null || step.to == null) return;
+    const { from, to } = step;
+    if (to <= from) return;
+    let math = false;
+    let text = 0;
+    tr.docs[i]?.nodesBetween(from, to, (node, pos) => {
+      if (MATH_NODES.has(node.type.name)) {
+        math = true;
+        return false;
+      }
+      if (node.isText) {
+        text += Math.min(to, pos + node.nodeSize) - Math.max(from, pos);
+      }
+      return true;
     });
+    if (math && text === 0) equationAlone = true;
   });
-  return touches && countMath(tr.doc) < countMath(before);
+  return equationAlone && countMath(tr.doc) < countMath(before);
 }
 
 export interface DocxControllerOptions {

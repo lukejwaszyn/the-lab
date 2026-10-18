@@ -449,4 +449,44 @@ describe("equations", () => {
       removesEquation({ ...tr, getMeta: () => ({}) } as any, withMath as any),
     ).toBe(false);
   });
+
+  it("lets a deleted passage take its equation with it, and accepting or rejecting", () => {
+    // A paragraph: 10 characters of text, then an equation at 11.
+    const text = { type: { name: "text" }, isText: true, nodeSize: 10 };
+    const math = { type: { name: "mathInline" }, nodeSize: 1 };
+    const doc = (withEquation: boolean) => ({
+      type: { name: "doc" },
+      nodeSize: 20,
+      descendants: (f: any) => {
+        f(text, 1);
+        if (withEquation) f(math, 11);
+      },
+      nodesBetween: (from: number, to: number, f: any) => {
+        if (from < 11 && to > 1) f(text, 1);
+        if (withEquation && from <= 11 && to > 11) f(math, 11);
+      },
+    });
+    const removing = (from: number, to: number, meta?: string) => ({
+      docChanged: true,
+      steps: [{ from, to }],
+      docs: [doc(true)],
+      doc: doc(false),
+      getMeta: (key: string) => (key === meta ? true : undefined),
+    });
+    // The equation alone: refused.
+    expect(removesEquation(removing(11, 12) as any, doc(true) as any)).toBe(
+      true,
+    );
+    // Text and the equation together: a deletion, allowed.
+    expect(removesEquation(removing(5, 12) as any, doc(true) as any)).toBe(
+      false,
+    );
+    // Accepting or rejecting a tracked change skips change tracking.
+    expect(
+      removesEquation(
+        removing(11, 12, "skipTrackChanges") as any,
+        doc(true) as any,
+      ),
+    ).toBe(false);
+  });
 });
