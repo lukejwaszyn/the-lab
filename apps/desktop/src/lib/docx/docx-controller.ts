@@ -526,9 +526,11 @@ export class DocxController implements DocxSession {
    * at a time: a save asked for while one runs waits for it, then saves
    * what is still unsaved (edits made meanwhile).
    *
-   * An implicit save (leaving the tab, renaming, closing the window) does
-   * not write over a change on disk that the tab is still asking about;
-   * ⌘S does, as Keep mine would.
+   * No save writes over a change made on disk that the tab has not shown:
+   * it shows it instead (Reload or Keep mine). An implicit save (leaving
+   * the tab, renaming, closing the window) also does not write over a
+   * change the tab is still asking about, which ⌘S does, as Keep mine
+   * would.
    */
   async save(options: SaveOptions = {}): Promise<boolean> {
     while (this.saving) await this.saving;
@@ -574,6 +576,15 @@ export class DocxController implements DocxSession {
     if (!this.sd || !this.original) return false;
     this.update({ saving: true, saveError: null });
     try {
+      if (!this.state.changedOnDisk) {
+        // Changed elsewhere since the tab last looked: show it, never
+        // write over it unseen.
+        const disk = await fileState(this.absolutePath);
+        if (decideOnDiskChange(this.knownModifiedMs, disk, true) !== "none") {
+          this.update({ saving: false, changedOnDisk: true });
+          return false;
+        }
+      }
       const save = await this.bytesToSave();
       this.unsaved = save;
       const disk = await saveDocxBytes(this.absolutePath, save.bytes);

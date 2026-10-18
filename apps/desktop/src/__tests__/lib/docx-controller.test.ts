@@ -81,6 +81,7 @@ import {
   type DocxTabState,
 } from "@/lib/docx/docx-controller";
 import {
+  flushDocxEdits,
   hasStashedDocxEdits,
   resetDocxSessionsForTest,
 } from "@/lib/docx/docx-session";
@@ -338,6 +339,21 @@ describe("unsaved edits", () => {
     expect(saves).toHaveLength(2);
     expect(controller.isDirty()).toBe(false);
   });
+
+  it("does not write over a change on disk it has not shown, even on Cmd+S", async () => {
+    const { controller } = makeController();
+    await controller.open();
+    last().transact();
+    fileOnDisk({ modifiedMs: 7000 });
+    expect(await controller.save()).toBe(false);
+    expect(saves).toHaveLength(0);
+    expect(controller.state.changedOnDisk).toBe(true);
+    // Shown: an implicit save still keeps off it, and Cmd+S is Keep mine.
+    expect(await controller.save({ implicit: true })).toBe(false);
+    expect(saves).toHaveLength(0);
+    expect(await controller.save()).toBe(true);
+    expect(saves).toHaveLength(1);
+  });
 });
 
 describe("closing with edits a save could not write", () => {
@@ -384,6 +400,22 @@ describe("closing with edits a save could not write", () => {
     expect(saves).toHaveLength(2);
     expect(hasStashedDocxEdits(PATH)).toBe(false);
     expect(controller.state.saveError).toBeNull();
+  });
+
+  it("keeps edits over a change on disk, and asks when it opens again", async () => {
+    const a = makeController().controller;
+    await a.open();
+    last().transact();
+    fileOnDisk({ modifiedMs: 8000 });
+    expect(await a.close()).toBe("kept");
+    expect(saves).toHaveLength(0);
+    expect(await flushDocxEdits()).toBe(false);
+    expect(saves).toHaveLength(0);
+
+    const b = makeController().controller;
+    await b.open();
+    expect(b.state.changedOnDisk).toBe(true);
+    expect(b.state.restored).toBe(true);
   });
 });
 
