@@ -24,7 +24,11 @@ import { clearZoomCache } from "@/components/workspace/preview/pdf-preview";
 import { clearEditorStateCache } from "@/components/workspace/editor/latex-editor";
 import { useProjectStore } from "@/stores/project-store";
 import { createLogger } from "@/lib/debug/logger";
-import { discardDocxEdits, flushDocxEdits } from "@/lib/docx/docx-session";
+import {
+  discardDocxEdits,
+  flushDocxEdits,
+  hasStashedDocxEdits,
+} from "@/lib/docx/docx-session";
 
 const log = createLogger("document");
 
@@ -398,7 +402,8 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
         relativePath: f.relativePath,
         absolutePath: f.absolutePath,
         type: f.type,
-        isDirty: false,
+        // The Lab: a Word file's edits kept after a failed save.
+        isDirty: f.type === "docx" && hasStashedDocxEdits(f.absolutePath),
         fileSize: f.fileSize,
       };
 
@@ -946,7 +951,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     const state = get();
     const active = getActiveFile(state);
     if (active?.type === "docx") {
-      await flushDocxEdits(active.absolutePath);
+      await flushDocxEdits(active.absolutePath, { explicit: true });
     }
     await state.saveFile(state.activeFileId);
     // Manual save → immediate snapshot
@@ -1172,7 +1177,8 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
           relativePath: fsFile.relativePath,
           absolutePath: fsFile.absolutePath,
           type: fsFile.type,
-          isDirty: false,
+          isDirty:
+            fsFile.type === "docx" && hasStashedDocxEdits(fsFile.absolutePath),
           fileSize: fsFile.fileSize,
         };
         const isLargeNonEssential =

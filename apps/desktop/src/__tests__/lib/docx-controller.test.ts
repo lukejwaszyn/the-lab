@@ -59,6 +59,10 @@ vi.mock("superdoc", () => ({
   Extensions: { Plugin: sd.Plugin, PluginKey: sd.PluginKey },
 }));
 vi.mock("superdoc/style.css", () => ({}));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({ onCloseRequested: vi.fn(async () => () => {}) }),
+}));
+vi.mock("sonner", () => ({ toast: { error: vi.fn(), warning: vi.fn() } }));
 vi.mock("@/lib/docx/preserve", () => ({
   preserveUnchanged: vi.fn((_o: Uint8Array, _b: Uint8Array, e: Uint8Array) => ({
     bytes: e,
@@ -76,6 +80,10 @@ import {
   type DocxFileState,
   type DocxTabState,
 } from "@/lib/docx/docx-controller";
+import {
+  hasStashedDocxEdits,
+  resetDocxSessionsForTest,
+} from "@/lib/docx/docx-session";
 import { preserveUnchanged } from "@/lib/docx/preserve";
 
 const PATH = "/project/Report draft.docx";
@@ -111,6 +119,7 @@ function last() {
 }
 
 beforeEach(() => {
+  resetDocxSessionsForTest();
   sd.made.length = 0;
   saves = [];
   disk = {
@@ -266,7 +275,7 @@ describe("unsaved edits", () => {
     const a = makeController().controller;
     await a.open();
     last().transact();
-    expect(await a.close()).toBe(true);
+    expect(await a.close()).toBe("saved");
     expect(saves).toHaveLength(1);
     expect(last().destroy).toHaveBeenCalled();
 
@@ -274,8 +283,37 @@ describe("unsaved edits", () => {
     await b.open();
     last().transact();
     b.discard();
-    await b.close();
+    expect(await b.close()).toBe("saved");
     expect(saves).toHaveLength(1);
+  });
+});
+
+describe("closing with edits a save could not write", () => {
+  function failSaves() {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "docx_save") throw "The folder could not be written.";
+      return { ...disk };
+    });
+  }
+
+  it("keeps them, and shows them unsaved when the file opens again", async () => {
+    const a = makeController().controller;
+    await a.open();
+    last().exports.push(new Uint8Array([4, 2]));
+    last().transact();
+    failSaves();
+    expect(await a.close()).toBe("kept");
+    expect(last().destroy).toHaveBeenCalled();
+    expect(hasStashedDocxEdits(PATH)).toBe(true);
+
+    const b = makeController().controller;
+    await b.open();
+    expect(readFile).toHaveBeenCalledTimes(1);
+    expect(b.state.restored).toBe(true);
+    expect(b.state.dirty).toBe(true);
+    expect(b.state.saveError).toMatch(/could not be written/);
+    expect(b.isDirty()).toBe(true);
+    expect(hasStashedDocxEdits(PATH)).toBe(false);
   });
 });
 

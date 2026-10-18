@@ -5,13 +5,25 @@
  * change made elsewhere reloads a tab with no unsaved edits and asks about
  * one with them, and Word's owner file beside it means Word has it open.
  */
-import { invoke } from "@tauri-apps/api/core";
 import { readFile } from "@tauri-apps/plugin-fs";
 import type { SuperDoc } from "superdoc";
 import { createLogger } from "@/lib/debug/logger";
 import type { DocxMode } from "@/stores/docx-store";
-import type { DocxSession } from "./docx-session";
+import {
+  fileState,
+  saveDocxBytes,
+  stashDocxEdits,
+  takeStashedDocxEdits,
+  trackDocxClose,
+  waitForDocxClose,
+  type DocxFileState,
+  type DocxSession,
+  type SaveOptions,
+  type StashedDocxEdits,
+} from "./docx-session";
 import { loadSuperDoc } from "./superdoc-loader";
+
+export { fileState, saveDocxBytes, type DocxFileState } from "./docx-session";
 
 const log = createLogger("docx");
 
@@ -24,15 +36,8 @@ export const OPEN_IN_WORD_NOTE =
   "This file is open in Word. Editing it in both places will conflict.";
 export const READ_ONLY_NOTE =
   "This file is read-only, so it opens for reading only.";
-
-/** What `docx_file_state` says about the file on disk. */
-export interface DocxFileState {
-  exists: boolean;
-  modifiedMs: number | null;
-  size: number;
-  openInWord: boolean;
-  readOnly: boolean;
-}
+export const KEPT_EDITS_NOTE =
+  "These are your unsaved edits from before. They have not been saved yet.";
 
 export interface DocxTabState {
   phase: "loading" | "ready" | "error";
@@ -49,6 +54,8 @@ export interface DocxTabState {
   readOnly: boolean;
   /** An edit inside an equation was refused. */
   equationNote: boolean;
+  /** The tab shows edits kept from an earlier failed save. */
+  restored: boolean;
 }
 
 export const INITIAL_TAB_STATE: DocxTabState = {
@@ -61,6 +68,7 @@ export const INITIAL_TAB_STATE: DocxTabState = {
   openInWord: false,
   readOnly: false,
   equationNote: false,
+  restored: false,
 };
 
 export type DiskDecision = "none" | "reload" | "ask";
@@ -93,19 +101,6 @@ export function isEquationEditError(payload: unknown): boolean {
         ? error
         : "";
   return /math|equation|omml/i.test(message);
-}
-
-export function fileState(path: string): Promise<DocxFileState> {
-  return invoke<DocxFileState>("docx_file_state", { path });
-}
-
-export function saveDocxBytes(
-  path: string,
-  bytes: Uint8Array,
-): Promise<DocxFileState> {
-  return invoke<DocxFileState>("docx_save", bytes, {
-    headers: { path: encodeURIComponent(path) },
-  });
 }
 
 async function exportDocx(sd: SuperDoc): Promise<Uint8Array> {
@@ -214,6 +209,12 @@ const COMMENT_CHANGES = new Set([
   "change-rejected",
 ]);
 
+/**
+ * What became of a tab's edits when it closed: saved, kept unsaved for
+ * when the file is opened again (`docx-session.ts`), or lost.
+ */
+export type CloseResult = "saved" | "kept" | "lost";
+
 export class DocxController implements DocxSession {
   readonly absolutePath: string;
   state: DocxTabState = { ...INITIAL_TAB_STATE };
@@ -228,6 +229,10 @@ export class DocxController implements DocxSession {
   private changes = 0;
   /** `changes` when the file was last read or written. */
   private savedChanges = 0;
+  /** The tab shows edits kept from a failed save, not yet written. */
+  private restored = false;
+  /** What the last failed save meant to write. */
+  private unsaved: Uint8Array | null = null;
   private knownModifiedMs: number | null = null;
   private mode: DocxMode;
   private readOnly = false;
@@ -249,7 +254,9 @@ export class DocxController implements DocxSession {
   }
 
   isDirty(): boolean {
-    return !this.discarded && this.changes !== this.savedChanges;
+    return (
+      !this.discarded && (this.restored || this.changes !== this.savedChanges)
+    );
   }
 
   private noteChange() {
@@ -257,25 +264,38 @@ export class DocxController implements DocxSession {
     if (!this.state.dirty) this.update({ dirty: true });
   }
 
-  /** Reads the file and shows it. */
+  /**
+   * Reads the file and shows it, or the edits kept for it from a failed
+   * save (`docx-session.ts`).
+   */
   async open(): Promise<void> {
     const generation = ++this.generation;
     this.changes = 0;
     this.savedChanges = 0;
+    this.restored = false;
+    this.unsaved = null;
     this.update({ ...INITIAL_TAB_STATE });
+    let kept: StashedDocxEdits | null = null;
     try {
+      // A tab on this file that is closing may still be saving it.
+      await waitForDocxClose(this.absolutePath);
+      if (generation !== this.generation || this.closed) return;
+      kept = takeStashedDocxEdits(this.absolutePath);
       const [bytes, disk] = await Promise.all([
-        readFile(this.absolutePath),
+        kept ? kept.bytes : readFile(this.absolutePath),
         fileState(this.absolutePath),
       ]);
       const { SuperDoc, Extensions } = await loadSuperDoc();
-      if (generation !== this.generation || this.closed) return;
+      if (generation !== this.generation || this.closed) {
+        if (kept) stashDocxEdits(kept);
+        return;
+      }
       this.destroyEditor();
       this.original = new Uint8Array(bytes);
       this.baseline = null;
       this.changes = 0;
       this.savedChanges = 0;
-      this.knownModifiedMs = disk.modifiedMs;
+      this.knownModifiedMs = kept ? kept.knownModifiedMs : disk.modifiedMs;
       this.readOnly = disk.readOnly;
       this.update({ openInWord: disk.openInWord, readOnly: disk.readOnly });
 
@@ -363,6 +383,7 @@ export class DocxController implements DocxSession {
       });
       if (generation !== this.generation || this.closed) {
         sd.destroy();
+        if (kept) stashDocxEdits(kept);
         return;
       }
       sd.on("document-mode-change", (payload) => {
@@ -373,9 +394,34 @@ export class DocxController implements DocxSession {
         }
       });
       this.guardEquations(sd, Extensions);
-      this.update({ phase: "ready" });
+      // The document shows once the baseline is taken, so that no edit
+      // comes before it.
       await this.takeBaseline(sd, generation);
+      if (generation !== this.generation || this.closed) {
+        if (kept) stashDocxEdits(kept);
+        return;
+      }
+      if (kept) {
+        this.restored = true;
+        const reason = kept.conflict ? null : kept.reason;
+        const changedSince =
+          disk.exists &&
+          disk.modifiedMs != null &&
+          kept.knownModifiedMs != null &&
+          disk.modifiedMs !== kept.knownModifiedMs;
+        kept = null;
+        this.update({
+          phase: "ready",
+          dirty: true,
+          restored: true,
+          changedOnDisk: changedSince,
+          saveError: reason ? `Not saved: ${reason}` : null,
+        });
+      } else {
+        this.update({ phase: "ready" });
+      }
     } catch (err) {
+      if (kept) stashDocxEdits(kept);
       if (generation !== this.generation) return;
       log.error("A Word file could not be opened", {
         path: this.absolutePath,
@@ -459,8 +505,16 @@ export class DocxController implements DocxSession {
     this.sd?.setDocumentMode(this.readOnly ? "viewing" : mode);
   }
 
-  /** Saves unsaved edits; true when nothing is left unsaved. */
-  save(): Promise<boolean> {
+  /**
+   * Saves unsaved edits; true when nothing is left unsaved. An implicit
+   * save (leaving the tab, renaming, closing the window) does not write
+   * over a change on disk that the tab is still asking about; ⌘S does,
+   * as Keep mine would.
+   */
+  save(options: SaveOptions = {}): Promise<boolean> {
+    if (options.implicit && this.state.changedOnDisk && this.isDirty()) {
+      return Promise.resolve(false);
+    }
     if (!this.saving) {
       this.saving = this.saveNow().finally(() => {
         this.saving = null;
@@ -469,36 +523,52 @@ export class DocxController implements DocxSession {
     return this.saving;
   }
 
-  private async saveNow(): Promise<boolean> {
+  /** The bytes a save writes now: SuperDoc's export, unchanged parts kept. */
+  private async bytesToSave(): Promise<{
+    bytes: Uint8Array;
+    edited: Uint8Array;
+    whole: boolean;
+  }> {
     const sd = this.sd;
+    const original = this.original;
+    if (!sd || !original) throw new Error("The document is not open.");
+    const edited = await exportDocx(sd);
+    // Loaded with the first save, like SuperDoc on the first open.
+    const { preserveUnchanged } = await import("./preserve");
+    const result = this.baseline
+      ? preserveUnchanged(original, this.baseline, edited)
+      : {
+          bytes: edited,
+          preserved: false,
+          reason: "no baseline",
+          changedParts: [],
+        };
+    if (!result.preserved) {
+      log.warn("Saved SuperDoc's whole export", { reason: result.reason });
+    }
+    return { bytes: result.bytes, edited, whole: !result.preserved };
+  }
+
+  private async saveNow(): Promise<boolean> {
     if (!this.isDirty()) return true;
-    if (!sd || !this.original) return false;
+    if (!this.sd || !this.original) return false;
     const changes = this.changes;
     this.update({ saving: true, saveError: null });
     try {
-      const edited = await exportDocx(sd);
-      // Loaded with the first save, like SuperDoc on the first open.
-      const { preserveUnchanged } = await import("./preserve");
-      const result = this.baseline
-        ? preserveUnchanged(this.original, this.baseline, edited)
-        : {
-            bytes: edited,
-            preserved: false,
-            reason: "no baseline",
-            changedParts: [],
-          };
-      if (!result.preserved) {
-        log.warn("Saved SuperDoc's whole export", { reason: result.reason });
-      }
-      const disk = await saveDocxBytes(this.absolutePath, result.bytes);
-      this.original = result.bytes;
+      const { bytes, edited } = await this.bytesToSave();
+      this.unsaved = bytes;
+      const disk = await saveDocxBytes(this.absolutePath, bytes);
+      this.original = bytes;
       this.baseline = edited;
+      this.unsaved = null;
+      this.restored = false;
       this.knownModifiedMs = disk.modifiedMs;
       this.savedChanges = changes;
       this.update({
         saving: false,
         dirty: this.isDirty(),
         changedOnDisk: false,
+        restored: false,
         openInWord: disk.openInWord,
       });
       return !this.isDirty();
@@ -576,16 +646,55 @@ export class DocxController implements DocxSession {
   }
 
   /**
-   * Saves unsaved edits (unless discarded) and closes the document. False
-   * when edits could not be saved and are lost.
+   * Saves unsaved edits (unless discarded) and closes the document. Edits
+   * that cannot be saved, or that would overwrite a change on disk the tab
+   * was still asking about, are kept for when the file opens again.
    */
-  async close(): Promise<boolean> {
-    if (this.closed) return true;
-    const saved = this.isDirty() ? await this.save() : true;
+  close(): Promise<CloseResult> {
+    const path = this.absolutePath;
+    const done = this.closeNow();
+    trackDocxClose(path, done);
+    return done;
+  }
+
+  private async closeNow(): Promise<CloseResult> {
+    if (this.closed) return "saved";
+    let result: CloseResult = "saved";
+    if (this.isDirty()) {
+      const conflict = this.state.changedOnDisk;
+      const saved = conflict ? false : await this.save({ implicit: true });
+      if (!saved) result = await this.keep(conflict);
+    }
     this.closed = true;
     this.generation++;
     if (this.noteTimer) clearTimeout(this.noteTimer);
     this.destroyEditor();
-    return saved;
+    return result;
+  }
+
+  /** Keeps the edits a save could not write (`docx-session.ts`). */
+  private async keep(conflict: boolean): Promise<CloseResult> {
+    let bytes = conflict ? null : this.unsaved;
+    if (!bytes) {
+      try {
+        bytes = (await this.bytesToSave()).bytes;
+      } catch (err) {
+        log.error("Unsaved Word edits could not be exported", {
+          error: String(err),
+        });
+        return "lost";
+      }
+    }
+    stashDocxEdits({
+      absolutePath: this.absolutePath,
+      bytes,
+      knownModifiedMs: this.knownModifiedMs,
+      reason: conflict
+        ? "the file changed on disk while it had unsaved edits"
+        : (this.state.saveError?.replace(/^Not saved: /, "") ??
+          "the save failed"),
+      conflict,
+    });
+    return "kept";
   }
 }

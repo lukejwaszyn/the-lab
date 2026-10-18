@@ -13,6 +13,7 @@ import {
   DocxController,
   EQUATION_NOTE,
   INITIAL_TAB_STATE,
+  KEPT_EDITS_NOTE,
   OPEN_IN_WORD_NOTE,
   READ_ONLY_NOTE,
   type DocxTabState,
@@ -96,10 +97,18 @@ export function DocxEditor({ file }: { file: ProjectFile }) {
       const closing = controller;
       if (!closing) return;
       // Showing another tab, or the project closing, saves unsaved edits.
-      void closing.close().then((saved) => {
+      // Edits that cannot be saved are kept, unsaved, for when the file
+      // opens again, and the file keeps its dot.
+      void closing.close().then((result) => {
         unregister?.();
-        markDirty(false);
-        if (!saved) {
+        markDirty(result === "kept");
+        if (result === "kept") {
+          toast.warning(
+            closing.state.changedOnDisk
+              ? `${file.name} changed on disk while you had unsaved edits, so they were not saved over it. Open it again to choose Reload or Keep mine.`
+              : `${file.name} could not be saved. Your edits are kept: open it again to save them. ${closing.state.saveError ?? ""}`,
+          );
+        } else if (result === "lost") {
           toast.error(
             `${file.name} could not be saved, so its latest edits were lost. ${closing.state.saveError ?? ""}`,
           );
@@ -189,6 +198,7 @@ export function DocxEditor({ file }: { file: ProjectFile }) {
           This file changed on disk while you had unsaved edits.
         </Banner>
       )}
+      {state.restored && <Banner tone="warning">{KEPT_EDITS_NOTE}</Banner>}
       {state.saveError && <Banner tone="error">{state.saveError}</Banner>}
       <div className="relative min-h-0 flex-1">
         <div
