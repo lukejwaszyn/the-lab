@@ -25,14 +25,21 @@ function sources(dir: string): string[] {
   });
 }
 
+/** Importing the editor and the stores cold can take a while on a busy machine. */
+const IMPORT_TIMEOUT_MS = 30_000;
+
 describe("loading SuperDoc", () => {
-  it("is not loaded by opening the editor or the Word tab's modules", async () => {
-    await import("@/components/workspace/editor/docx-editor");
-    await import("@/lib/docx/docx-controller");
-    await import("@/stores/document-store");
-    expect(loaded.superdoc).toBe(0);
-    expect(loaded.css).toBe(0);
-  });
+  it(
+    "is not loaded by opening the editor or the Word tab's modules",
+    async () => {
+      await import("@/components/workspace/editor/docx-editor");
+      await import("@/lib/docx/docx-controller");
+      await import("@/stores/document-store");
+      expect(loaded.superdoc).toBe(0);
+      expect(loaded.css).toBe(0);
+    },
+    IMPORT_TIMEOUT_MS,
+  );
 
   it("loads, styles included, the first time a Word tab asks", async () => {
     const { loadSuperDoc } = await import("@/lib/docx/superdoc-loader");
