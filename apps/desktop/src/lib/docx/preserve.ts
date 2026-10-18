@@ -11,14 +11,47 @@
  * bytes of it are written; only what differs comes from `edited`. Within
  * the body, footnotes, endnotes, headers and footers this works paragraph by
  * paragraph (each top-level block of the part), mapped to the original by
- * position once their text is checked to match.
+ * position once their text is checked to match. Comments go one by one
+ * (`preserve-comments.ts`). The package's own lists (content types and
+ * relationships) stay the original's, with only what the edit added or
+ * removed added or removed.
+ *
+ * Ids that SuperDoc numbers afresh on each export (comments, tracked
+ * changes) do not count as a difference, and blocks taken from the edit get
+ * the ids the saved file uses.
  *
  * When the mapping cannot be trusted, or the result would not hold
  * together (a relationship, comment or note it names is missing), the save
  * falls back to SuperDoc's whole export, which is what SuperDoc alone would
- * have written.
+ * have written, with its comments repaired.
  */
 import { strFromU8, strToU8, unzipSync, zipSync, type Zippable } from "fflate";
+import {
+  attributes,
+  blockText,
+  mergeRootTag,
+  prefixesUsed,
+  splitPart,
+  withoutVolatileIds,
+  type SplitPart,
+} from "./docx-xml";
+import {
+  COMMENT_PART_TYPES,
+  COMMENT_PARTS,
+  COMMENTS,
+  CommentsMismatch,
+  repairCommentsPart,
+  spliceComments,
+} from "./preserve-comments";
+
+export {
+  blockText,
+  mergeRootTag,
+  prefixesUsed,
+  splitPart,
+  withoutVolatileIds,
+  type SplitPart,
+} from "./docx-xml";
 
 export interface PreserveResult {
   bytes: Uint8Array;
@@ -33,13 +66,6 @@ export interface PreserveResult {
 type Files = Record<string, Uint8Array>;
 
 const CONTENT_TYPES = "[Content_Types].xml";
-const COMMENT_PARTS = new Set([
-  "word/comments.xml",
-  "word/commentsExtended.xml",
-  "word/commentsIds.xml",
-  "word/commentsExtensible.xml",
-  "word/people.xml",
-]);
 
 /**
  * The package's properties stay as they were: SuperDoc recounts pages and
@@ -79,23 +105,6 @@ function isXml(name: string): boolean {
   return name.endsWith(".xml") || name.endsWith(".rels");
 }
 
-/**
- * The part with what differs between two exports of the same document
- * removed: the ids SuperDoc draws at random on each export (paragraph ids,
- * GUIDs).
- */
-export function withoutVolatileIds(xml: string): string {
-  return xml
-    .replace(
-      /\s(?:w14|w15|w16cid|w16du):(?:paraId|textId|paraIdParent|durableId)="[^"]*"/g,
-      "",
-    )
-    .replace(
-      /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
-      "",
-    );
-}
-
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -108,174 +117,46 @@ function samePart(name: string, a: Uint8Array, b: Uint8Array): boolean {
   return withoutVolatileIds(strFromU8(a)) === withoutVolatileIds(strFromU8(b));
 }
 
-// ─── Splitting a part into its top-level blocks, keeping the bytes ───
+// ─── Ids SuperDoc numbers afresh on each export ───
 
-export interface SplitPart {
-  /** Everything up to and including the container's start tag. */
-  head: string;
-  /** The root element's start tag (for its namespace declarations). */
-  rootTag: string;
-  /** The container's element children, exactly as written. */
-  blocks: string[];
-  /** What came before each block (whitespace, comments). */
-  gaps: string[];
-  /** The container's end tag and everything after it. */
-  tail: string;
-}
-
-/** The index of the `>` that ends the tag opening at `start`. */
-function tagEnd(xml: string, start: number): number {
-  let quote = "";
-  for (let i = start + 1; i < xml.length; i++) {
-    const c = xml[i];
-    if (quote) {
-      if (c === quote) quote = "";
-    } else if (c === '"' || c === "'") {
-      quote = c;
-    } else if (c === ">") {
-      return i;
-    }
-  }
-  return -1;
-}
-
-function tagName(xml: string, start: number): string {
-  const m = /^<\/?([^\s/>]+)/.exec(xml.slice(start, start + 200));
-  return m ? m[1] : "";
-}
+const COMMENT_MARK =
+  /(<w:(?:commentRangeStart|commentRangeEnd|commentReference)\b[^>]*?\sw:id=")([^"]*)(")/g;
+/** Whether a part marks a comment (no `g` flag: `test` keeps no state). */
+const HAS_COMMENT_MARK =
+  /<w:(?:commentRangeStart|commentRangeEnd|commentReference)\b/;
 
 /**
- * Splits `xml` into the top-level children of its container: `w:body` for
- * a document, the root element for notes, headers and footers. Null when
- * it is not well-formed enough to split.
+ * Tracked changes and the like that stand alone (unlike range starts and
+ * ends, whose ids pair them up across blocks).
  */
-export function splitPart(
+const REVISION =
+  /(<w:(?:ins|del|moveFrom|moveTo|rPrChange|pPrChange|sectPrChange|tblPrChange|tblGridChange|tblPrExChange|trPrChange|tcPrChange|numberingChange|cellIns|cellDel|cellMerge)\b[^>]*?\sw:id=")([^"]*)(")/g;
+
+/** `xml` with its comment marks numbered as `ids` says. */
+export function renumberComments(
   xml: string,
-  container: "body" | "root",
-): SplitPart | null {
-  let depth = 0;
-  const open: string[] = [];
-  let containerDepth = -1;
-  let head = "";
-  let rootTag = "";
-  const blocks: string[] = [];
-  const gaps: string[] = [];
-  let lastEnd = -1;
-  let blockStart = -1;
-  let i = 0;
-  while (i < xml.length) {
-    const lt = xml.indexOf("<", i);
-    if (lt < 0) break;
-    if (xml.startsWith("<!--", lt)) {
-      const e = xml.indexOf("-->", lt + 4);
-      if (e < 0) return null;
-      i = e + 3;
-      continue;
-    }
-    if (xml.startsWith("<![CDATA[", lt)) {
-      const e = xml.indexOf("]]>", lt);
-      if (e < 0) return null;
-      i = e + 3;
-      continue;
-    }
-    if (xml.startsWith("<?", lt)) {
-      const e = xml.indexOf("?>", lt);
-      if (e < 0) return null;
-      i = e + 2;
-      continue;
-    }
-    if (xml.startsWith("<!", lt)) {
-      const e = xml.indexOf(">", lt);
-      if (e < 0) return null;
-      i = e + 1;
-      continue;
-    }
-    const end = tagEnd(xml, lt);
-    if (end < 0) return null;
-    const closing = xml[lt + 1] === "/";
-    const selfClosing = !closing && xml[end - 1] === "/";
-    if (closing) {
-      depth--;
-      if (depth < 0 || open.pop() !== tagName(xml, lt)) return null;
-      if (containerDepth >= 0 && depth === containerDepth && blockStart >= 0) {
-        blocks.push(xml.slice(blockStart, end + 1));
-        lastEnd = end + 1;
-        blockStart = -1;
-      } else if (containerDepth >= 0 && depth === containerDepth - 1) {
-        if (blockStart >= 0) return null;
-        gaps.push(xml.slice(lastEnd, lt));
-        return { head, rootTag, blocks, gaps, tail: xml.slice(lt) };
-      }
-    } else {
-      if (depth === 0 && !rootTag) rootTag = xml.slice(lt, end + 1);
-      if (containerDepth < 0) {
-        const isContainer =
-          container === "root"
-            ? depth === 0
-            : depth === 1 && tagName(xml, lt) === "w:body";
-        if (isContainer) {
-          if (selfClosing) {
-            return {
-              head: xml.slice(0, lt),
-              rootTag,
-              blocks: [],
-              gaps: [],
-              tail: xml.slice(lt),
-            };
-          }
-          containerDepth = depth + 1;
-          head = xml.slice(0, end + 1);
-          lastEnd = end + 1;
-        }
-      } else if (depth === containerDepth) {
-        gaps.push(xml.slice(lastEnd, lt));
-        if (selfClosing) {
-          blocks.push(xml.slice(lt, end + 1));
-          lastEnd = end + 1;
-        } else {
-          blockStart = lt;
-        }
-      }
-      if (!selfClosing) {
-        depth++;
-        open.push(tagName(xml, lt));
-      }
-    }
-    i = end + 1;
-  }
-  return null;
+  ids: Map<string, string>,
+): string {
+  return xml.replace(
+    COMMENT_MARK,
+    (whole, before: string, id: string, after: string) =>
+      ids.has(id) ? before + ids.get(id) + after : whole,
+  );
 }
 
-const ENTITIES: Record<string, string> = {
-  lt: "<",
-  gt: ">",
-  amp: "&",
-  quot: '"',
-  apos: "'",
-};
-
-function decodeEntities(text: string): string {
-  return text.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|[a-z]+);/g, (whole, body) => {
-    if (body[0] === "#") {
-      const code =
-        body[1] === "x"
-          ? Number.parseInt(body.slice(2), 16)
-          : Number.parseInt(body.slice(1), 10);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : whole;
-    }
-    return ENTITIES[body] ?? whole;
-  });
+function revisionIds(xml: string): string[] {
+  return [...xml.matchAll(REVISION)].map((m) => m[2]);
 }
 
-/** A block's text with all whitespace removed, to match blocks up. */
-export function blockText(block: string): string {
-  let text = "";
-  const re =
-    /<(w:t|m:t|w:delText|w:instrText)(?:\s[^>]*)?>([^<]*)<\/(?:w:t|m:t|w:delText|w:instrText)>/g;
-  for (let m = re.exec(block); m; m = re.exec(block)) text += m[2];
-  return decodeEntities(text).replace(/[\s​﻿]/g, "");
+/** What a block is compared by: no ids that SuperDoc draws or renumbers. */
+function comparable(block: string, commentIds: Map<string, string>): string {
+  return withoutVolatileIds(
+    renumberComments(block, commentIds).replace(
+      REVISION,
+      (_w, before: string, _id: string, after: string) => before + after,
+    ),
+  );
 }
-
 // ─── Aligning the baseline export's blocks with the edited export's ───
 
 type Op =
@@ -336,74 +217,6 @@ export function alignBlocks(a: string[], b: string[]): Op[] {
   return ops;
 }
 
-// ─── Namespaces the edited blocks need on the original's root ───
-
-function attributes(tag: string): Map<string, string> {
-  const out = new Map<string, string>();
-  const re = /\s([^\s=/>]+)\s*=\s*("[^"]*"|'[^']*')/g;
-  for (let m = re.exec(tag); m; m = re.exec(tag)) {
-    out.set(m[1], m[2].slice(1, -1));
-  }
-  return out;
-}
-
-/** The namespace prefixes that elements and attributes in `xml` use. */
-export function prefixesUsed(xml: string): Set<string> {
-  const out = new Set<string>();
-  const re = /(?:<\/?|\s)([A-Za-z_][\w.-]*):[A-Za-z_][\w.-]*(?=[\s=>/])/g;
-  for (let m = re.exec(xml); m; m = re.exec(xml)) {
-    if (m[1] !== "xmlns" && m[1] !== "xml") out.add(m[1]);
-  }
-  return out;
-}
-
-/**
- * The original root start tag, with the namespace declarations (and
- * mc:Ignorable entries) from the edited export's root for the prefixes in
- * `used` that it lacks, so the edited blocks it now holds stay
- * well-formed. Nothing else about it changes.
- */
-export function mergeRootTag(
-  original: string,
-  edited: string,
-  used: Set<string>,
-): string {
-  const have = attributes(original);
-  const want = attributes(edited);
-  const add: string[] = [];
-  const declared = (prefix: string) => have.has(`xmlns:${prefix}`);
-  const needed = [...used].filter(
-    (p) => !declared(p) && want.has(`xmlns:${p}`),
-  );
-  const ignorableWanted = (want.get("mc:Ignorable") ?? "")
-    .split(/\s+/)
-    .filter((p) => p && needed.includes(p));
-  if (ignorableWanted.length > 0 && !declared("mc") && !needed.includes("mc")) {
-    needed.push("mc");
-  }
-  for (const prefix of needed) {
-    add.push(`xmlns:${prefix}="${want.get(`xmlns:${prefix}`)}"`);
-  }
-  let tag = original;
-  if (ignorableWanted.length > 0) {
-    const current = have.get("mc:Ignorable");
-    const tokens = new Set((current ?? "").split(/\s+/).filter(Boolean));
-    const before = tokens.size;
-    for (const t of ignorableWanted) tokens.add(t);
-    if (current === undefined) {
-      add.push(`mc:Ignorable="${[...tokens].join(" ")}"`);
-    } else if (tokens.size !== before) {
-      tag = tag.replace(
-        /(\smc:Ignorable\s*=\s*)("[^"]*"|'[^']*')/,
-        `$1"${[...tokens].join(" ")}"`,
-      );
-    }
-  }
-  if (add.length === 0) return tag;
-  const close = tag.endsWith("/>") ? tag.length - 2 : tag.length - 1;
-  return `${tag.slice(0, close)} ${add.join(" ")}${tag.slice(close)}`;
-}
-
 function spliceKind(xml: string): "body" | "root" | null {
   // The root element's name: the first tag that is not a declaration,
   // processing instruction or comment.
@@ -411,13 +224,22 @@ function spliceKind(xml: string): "body" | "root" | null {
   return m ? (SPLICED_ROOTS[m[1]] ?? null) : null;
 }
 
-/** `original` with the blocks the edit changed taken from `edited`. */
-function splicePart(
+interface SplicePlan {
+  name: string;
+  o: SplitPart;
+  e: SplitPart;
+  ops: Op[];
+}
+
+/** Which blocks of `original` an edit kept, and which it replaced. */
+function planSplice(
   name: string,
   original: string,
   baseline: string,
   edited: string,
-): string {
+  baselineIds: Map<string, string>,
+  editedIds: Map<string, string>,
+): SplicePlan {
   const kind = spliceKind(original);
   if (!kind) throw new Fallback(`${name} cannot be split`);
   const o = splitPart(original, kind);
@@ -435,17 +257,62 @@ function splicePart(
     }
   }
   const ops = alignBlocks(
-    b.blocks.map(withoutVolatileIds),
-    e.blocks.map(withoutVolatileIds),
+    b.blocks.map((block) => comparable(block, baselineIds)),
+    e.blocks.map((block) => comparable(block, editedIds)),
   );
+  return { name, o, e, ops };
+}
+
+/**
+ * Numbers for the tracked changes in blocks taken from the edit, so that
+ * none repeats one in a block kept from the original.
+ */
+class RevisionIds {
+  private readonly taken: Set<string>;
+  private next: number;
+  private readonly given = new Map<string, string>();
+
+  constructor(kept: string[], all: string[]) {
+    this.taken = new Set(kept);
+    const numbers = all.map((id) => Number.parseInt(id, 10));
+    this.next = Math.max(0, ...numbers.filter(Number.isFinite)) + 1;
+  }
+
+  apply(xml: string): string {
+    return xml.replace(
+      REVISION,
+      (whole, before: string, id: string, after: string) => {
+        if (!this.taken.has(id)) return whole;
+        let fresh = this.given.get(id);
+        if (!fresh) {
+          while (this.taken.has(String(this.next))) this.next++;
+          fresh = String(this.next++);
+          this.given.set(id, fresh);
+        }
+        return before + fresh + after;
+      },
+    );
+  }
+}
+
+/** `original` with the blocks the edit changed taken from `edited`. */
+function applySplice(
+  plan: SplicePlan,
+  editedIds: Map<string, string>,
+  revisions: RevisionIds,
+): string {
+  const { o, e, ops } = plan;
   let body = "";
   let fromEdit = "";
   for (const op of ops) {
     if (op.kind === "same") {
       body += o.gaps[op.a] + o.blocks[op.a];
     } else if (op.kind === "new") {
-      body += e.gaps[op.b] + e.blocks[op.b];
-      fromEdit += e.blocks[op.b];
+      const block = revisions.apply(
+        renumberComments(e.blocks[op.b], editedIds),
+      );
+      body += e.gaps[op.b] + block;
+      fromEdit += block;
     }
   }
   body += o.gaps[o.blocks.length] ?? "";
@@ -454,6 +321,192 @@ function splicePart(
   return head + body + o.tail;
 }
 
+// ─── The package's lists: content types and relationships ───
+
+function partNameOf(element: string): string | null {
+  const name = attributes(element).get("PartName");
+  return name ? decodeURIComponent(name.replace(/^\//, "")) : null;
+}
+
+function extensionOf(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot < 0 ? "" : name.slice(dot + 1).toLowerCase();
+}
+
+function contentTypeElements(xml: string): string[] {
+  return (
+    xml.match(
+      /<(?:Default|Override)\b[^>]*?(?:\/>|>\s*<\/(?:Default|Override)>)/g,
+    ) ?? []
+  );
+}
+
+function insertBefore(xml: string, closing: string, added: string[]): string {
+  if (added.length === 0) return xml;
+  const at = xml.lastIndexOf(closing);
+  if (at < 0) throw new Fallback(`no ${closing} to add to`);
+  return xml.slice(0, at) + added.join("") + xml.slice(at);
+}
+
+function removeElements(xml: string, gone: string[]): string {
+  let out = xml;
+  for (const element of gone) out = out.replace(element, "");
+  return out;
+}
+
+/** The original's content types, covering what was added and not removed. */
+function mergeContentTypes(
+  original: string,
+  edited: string | null,
+  out: Files,
+  originalNames: Set<string>,
+): string {
+  const elements = contentTypeElements(original);
+  const overrides = new Map<string, string>();
+  const defaults = new Set<string>();
+  for (const el of elements) {
+    const part = el.startsWith("<Override") ? partNameOf(el) : null;
+    if (part) overrides.set(part, el);
+    const ext = attributes(el).get("Extension");
+    if (el.startsWith("<Default") && ext) defaults.add(ext.toLowerCase());
+  }
+  const theirs = edited ? contentTypeElements(edited) : [];
+  const added: string[] = [];
+  for (const name of Object.keys(out)) {
+    if (originalNames.has(name) || name === CONTENT_TYPES) continue;
+    if (overrides.has(name)) continue;
+    const override = theirs.find(
+      (el) => el.startsWith("<Override") && partNameOf(el) === name,
+    );
+    if (override) {
+      added.push(override);
+      overrides.set(name, override);
+      continue;
+    }
+    const known = COMMENT_PART_TYPES[name];
+    if (known) {
+      added.push(
+        `<Override PartName="/${name}" ContentType="${known.contentType}"/>`,
+      );
+      continue;
+    }
+    const ext = extensionOf(name);
+    if (defaults.has(ext)) continue;
+    const def = theirs.find(
+      (el) =>
+        el.startsWith("<Default") &&
+        attributes(el).get("Extension")?.toLowerCase() === ext,
+    );
+    if (!def) throw new Fallback(`no content type for ${name}`);
+    added.push(def);
+    defaults.add(ext);
+  }
+  const gone = [...overrides]
+    .filter(([name]) => originalNames.has(name) && !(name in out))
+    .map(([, el]) => el);
+  return insertBefore(removeElements(original, gone), "</Types>", added);
+}
+
+function relationshipElements(xml: string): string[] {
+  return xml.match(/<Relationship\b[^>]*?(?:\/>|>\s*<\/Relationship>)/g) ?? [];
+}
+
+/** The part whose relationships `relsPath` lists ("" for the package). */
+function sourceOf(relsPath: string): string {
+  return relsPath.replace(/_rels\/([^/]*)\.rels$/, "$1");
+}
+
+/**
+ * The original's relationships, without those to parts the edit removed,
+ * and with those the edit added (to parts in `out`, or outside the file).
+ */
+function mergeRelationships(
+  relsPath: string,
+  original: string | null,
+  edited: string | null,
+  out: Files,
+  alreadyDangling: Set<string>,
+): string | null {
+  const target = (el: string) => {
+    const attrs = attributes(el);
+    return attrs.get("TargetMode") === "External"
+      ? `external:${attrs.get("Target") ?? ""}`
+      : relationshipTarget(relsPath, el);
+  };
+  const missing = (el: string) => {
+    const t = target(el);
+    return (
+      t != null &&
+      !t.startsWith("external:") &&
+      !(t in out) &&
+      !alreadyDangling.has(`${relsPath} -> ${t}`)
+    );
+  };
+  const theirs = edited ? relationshipElements(edited) : [];
+  if (original == null) {
+    if (edited == null) return null;
+    return removeElements(edited, theirs.filter(missing));
+  }
+  const mine = relationshipElements(original);
+  const byId = new Map(mine.map((el) => [attributes(el).get("Id"), el]));
+  const targets = new Set(
+    mine.map((el) => `${attributes(el).get("Type")} ${target(el)}`),
+  );
+  const added: string[] = [];
+  for (const el of theirs) {
+    const id = attributes(el).get("Id");
+    const existing = id ? byId.get(id) : undefined;
+    if (existing) {
+      if (target(existing) !== target(el)) {
+        throw new Fallback(`${relsPath}: ${id} names another part`);
+      }
+      continue;
+    }
+    if (missing(el)) continue;
+    if (targets.has(`${attributes(el).get("Type")} ${target(el)}`)) continue;
+    added.push(el);
+  }
+  const merged = insertBefore(
+    removeElements(original, mine.filter(missing)),
+    "</Relationships>",
+    added,
+  );
+  return merged;
+}
+
+/** The package's lists for `out`, from the original's. */
+function mergeLists(out: Files, o: Files, e: Files): void {
+  const originalNames = new Set(Object.keys(o));
+  const dangling = danglingTargets(o);
+  const relsNames = new Set(
+    [...Object.keys(o), ...Object.keys(e)].filter((n) => n.endsWith(".rels")),
+  );
+  for (const name of relsNames) {
+    const source = sourceOf(name);
+    if (source !== "" && !(source in out)) continue;
+    const merged = mergeRelationships(
+      name,
+      o[name] ? strFromU8(o[name]) : null,
+      e[name] ? strFromU8(e[name]) : null,
+      out,
+      dangling,
+    );
+    if (merged == null) continue;
+    out[name] =
+      o[name] && merged === strFromU8(o[name]) ? o[name] : strToU8(merged);
+  }
+  if (o[CONTENT_TYPES]) {
+    const original = strFromU8(o[CONTENT_TYPES]);
+    const merged = mergeContentTypes(
+      original,
+      e[CONTENT_TYPES] ? strFromU8(e[CONTENT_TYPES]) : null,
+      out,
+      originalNames,
+    );
+    out[CONTENT_TYPES] =
+      merged === original ? o[CONTENT_TYPES] : strToU8(merged);
+  }
+}
 // ─── Checks that the result holds together ───
 
 function relsPathFor(part: string): string {
@@ -567,6 +620,39 @@ function zip(out: Files, order: string[]): Uint8Array {
   return zipSync(entries);
 }
 
+/** Each `w15:commentEx` names a comment paragraph that exists. */
+function checkCommentsExtended(out: Files): void {
+  const ext = out["word/commentsExtended.xml"];
+  if (!ext) return;
+  const comments = out[COMMENTS] ? strFromU8(out[COMMENTS]) : "";
+  const paras = new Set(
+    [...comments.matchAll(/\sw14:paraId="([0-9A-Fa-f]+)"/g)].map((m) =>
+      m[1].toUpperCase(),
+    ),
+  );
+  for (const m of strFromU8(ext).matchAll(
+    /\sw15:(?:paraId|paraIdParent)="([0-9A-Fa-f]+)"/g,
+  )) {
+    if (!paras.has(m[1].toUpperCase())) {
+      throw new Fallback(
+        `commentsExtended.xml names a missing paragraph ${m[1]}`,
+      );
+    }
+  }
+}
+
+/** SuperDoc's whole export, its comments repaired (`preserve-comments.ts`). */
+function wholeExport(edited: Uint8Array, files: Files | null): Uint8Array {
+  if (!files?.[COMMENTS]) return edited;
+  try {
+    const repaired = repairCommentsPart(strFromU8(files[COMMENTS]));
+    const order = Object.keys(files);
+    return zip({ ...files, [COMMENTS]: strToU8(repaired) }, order);
+  } catch {
+    return edited;
+  }
+}
+
 /**
  * The bytes to save for a Word file opened from `original`, whose state
  * SuperDoc exported as `baseline` when it loaded and as `edited` now.
@@ -576,104 +662,125 @@ export function preserveUnchanged(
   baseline: Uint8Array,
   edited: Uint8Array,
 ): PreserveResult {
+  let e: Files | null = null;
   try {
     const o = unzip(original, "The file");
     const b = unzip(baseline, "The export as loaded");
-    const e = unzip(edited, "The export");
+    e = unzip(edited, "The export");
     const out: Files = {};
-    const changed: string[] = [];
-    const editedOnly: string[] = [];
-
-    const commentsTouched = [...COMMENT_PARTS].some(
-      (n) => n in b !== n in e || (n in e && !samePart(n, b[n], e[n])),
-    );
-    let packageFromEdited = false;
+    const changed = new Set<string>();
+    const comments = spliceComments(o, b, e);
+    const plans: SplicePlan[] = [];
 
     for (const name of new Set([...Object.keys(o), ...Object.keys(e)])) {
+      // The lists and the comments are settled below.
+      if (name === CONTENT_TYPES || name.endsWith(".rels")) continue;
+      if (COMMENT_PARTS.has(name)) continue;
       const inO = name in o;
       const inB = name in b;
       const inE = name in e;
       if (KEPT_PROPERTIES.has(name)) {
         if (inO) out[name] = o[name];
-        else if (inE) editedOnly.push(name);
         continue;
       }
-      if (
-        inE &&
-        inB &&
-        samePart(name, b[name], e[name]) &&
-        !(commentsTouched && COMMENT_PARTS.has(name))
-      ) {
-        // Not touched by the edit.
-        if (inO) out[name] = o[name];
-        else editedOnly.push(name);
-      } else if (inE) {
-        if (
-          inO &&
-          !COMMENT_PARTS.has(name) &&
-          isXml(name) &&
-          spliceKind(strFromU8(o[name])) &&
-          inB
-        ) {
-          out[name] = strToU8(
-            splicePart(
+      if (inO && !inB) {
+        // SuperDoc never writes this part: keep it.
+        out[name] = o[name];
+      } else if (inO && !inE) {
+        // The edit removed it.
+        changed.add(name);
+      } else if (inO) {
+        const same = samePart(name, b[name], e[name]);
+        // A part with comment marks is spliced even when the two exports
+        // agree, so that its comment ids are the saved file's.
+        if (same && !HAS_COMMENT_MARK.test(strFromU8(e[name]))) {
+          out[name] = o[name];
+        } else if (isXml(name) && spliceKind(strFromU8(o[name]))) {
+          plans.push(
+            planSplice(
               name,
               strFromU8(o[name]),
               strFromU8(b[name]),
               strFromU8(e[name]),
+              comments.baselineIds,
+              comments.editedIds,
             ),
           );
+        } else if (same) {
+          out[name] = o[name];
         } else {
           out[name] = e[name];
-          if (!inO) packageFromEdited = true;
-          if (name === CONTENT_TYPES || name.endsWith(".rels")) {
-            packageFromEdited = true;
-          }
+          changed.add(name);
         }
-        changed.push(name);
-      } else if (inO && !inB) {
-        // SuperDoc never writes this part: keep it.
+      } else if (!inB || !samePart(name, b[name], e[name])) {
+        // Added by the edit (SuperDoc's own additions on every export,
+        // the same as loaded, are left out).
+        out[name] = e[name];
+        changed.add(name);
+      }
+    }
+
+    // Blocks: tracked changes taken from the edit must not repeat an id
+    // kept from the original.
+    const kept: string[] = [];
+    const all: string[] = [];
+    for (const plan of plans) {
+      for (const op of plan.ops) {
+        if (op.kind === "same") kept.push(...revisionIds(plan.o.blocks[op.a]));
+      }
+      all.push(...revisionIds(plan.o.blocks.join("")));
+      all.push(...revisionIds(plan.e.blocks.join("")));
+    }
+    const revisions = new RevisionIds(kept, all);
+    for (const plan of plans) {
+      const xml = applySplice(plan, comments.editedIds, revisions);
+      const originalXml = strFromU8(o[plan.name]);
+      if (xml === originalXml) {
+        out[plan.name] = o[plan.name];
+      } else {
+        out[plan.name] = strToU8(xml);
+        changed.add(plan.name);
+      }
+    }
+
+    for (const name of COMMENT_PARTS) {
+      if (name in comments.parts) {
+        const bytes = comments.parts[name];
+        if (bytes) out[name] = bytes;
+        changed.add(name);
+      } else if (name in o) {
         out[name] = o[name];
       }
-      // In the original and the baseline but not the edit: the edit removed it.
     }
 
-    if (packageFromEdited) {
-      // A part was added, or the package's own lists changed: its lists
-      // (content types, relationships) and every part they name come from
-      // the edit.
-      for (const name of Object.keys(e)) {
-        if (
-          name === CONTENT_TYPES ||
-          name.endsWith(".rels") ||
-          editedOnly.includes(name)
-        ) {
-          if (!out[name] || !sameBytes(out[name], e[name])) {
-            out[name] = e[name];
-            if (!changed.includes(name)) changed.push(name);
-          }
-        }
+    mergeLists(out, o, e);
+    for (const name of Object.keys(out)) {
+      if (
+        !(name in o) ||
+        (out[name] !== o[name] && !sameBytes(out[name], o[name]))
+      ) {
+        changed.add(name);
       }
     }
+    for (const name of Object.keys(o)) if (!(name in out)) changed.add(name);
 
-    checkWhole(out, o, changed);
+    checkWhole(out, o, [...changed]);
+    checkCommentsExtended(out);
 
-    const unchanged =
-      changed.length === 0 &&
-      Object.keys(out).length === Object.keys(o).length &&
-      Object.keys(o).every((n) => out[n] === o[n]);
-    if (unchanged) {
+    if (changed.size === 0) {
       return { bytes: original, preserved: true, changedParts: [] };
     }
     return {
       bytes: zip(out, Object.keys(o)),
       preserved: true,
-      changedParts: changed.sort(),
+      changedParts: [...changed].sort(),
     };
   } catch (err) {
-    if (!(err instanceof Fallback)) throw err;
+    if (!(err instanceof Fallback) && !(err instanceof CommentsMismatch)) {
+      throw err;
+    }
     return {
-      bytes: edited,
+      bytes: wholeExport(edited, e),
       preserved: false,
       reason: err.message,
       changedParts: ["(the whole file)"],
